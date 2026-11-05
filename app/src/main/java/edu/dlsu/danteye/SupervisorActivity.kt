@@ -120,6 +120,12 @@ class SupervisorActivity : Activity() {
             text = if (cloud.signedIn) "Sign out · ${cloud.email}" else "Sign in (Supervisor researcher account)"
             isAllCaps = false
             setOnClickListener { if (cloud.signedIn) { detachLive(); cloud.signOut() } else cloud.signInDialog("supervisor") }
+            setTextColor(android.graphics.Color.rgb(255, 240, 243))
+            backgroundTintList =
+                android.content.res.ColorStateList.valueOf(
+                    android.graphics.Color.rgb(130, 40, 60)
+                )
+
         })
         content.addView(account, Ui.blockParams(this))
         if (cloud.role != "supervisor") {

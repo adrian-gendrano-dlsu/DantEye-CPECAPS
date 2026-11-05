@@ -126,6 +126,12 @@ class MainActivity : Activity() {
             setOnClickListener {
                 if (cloud.signedIn) cloud.signOut() else cloud.signInDialog("driver")
             }
+            setTextColor(android.graphics.Color.rgb(255, 240, 243))
+            backgroundTintList =
+                android.content.res.ColorStateList.valueOf(
+                    android.graphics.Color.rgb(130, 40, 60)
+                )
+
         }
         target.addView(button)
         if (cloud.signedIn && cloud.role != "driver") {
@@ -233,11 +239,16 @@ class MainActivity : Activity() {
                     cloud.flush(); cloud.toast("Sync requested. Check pending count and Firebase connection.")
                 }
             }
+            setTextColor(android.graphics.Color.rgb(255, 240, 243))
+            backgroundTintList =
+                android.content.res.ColorStateList.valueOf(
+                    android.graphics.Color.rgb(130, 40, 60)
+                )
+
         }
-        sync.addView(button)
+
         sync.addView(Ui.note(this, "Last successful event sync: ${cloud.lastSyncText()}"))
         sync.addView(Ui.note(this, "Pending simulated events: ${cloud.pendingCount}"))
-        sync.addView(Ui.note(this, cloud.connectionLabel))
         accountArea(sync)
         page.addView(sync, Ui.blockParams(this))
     }

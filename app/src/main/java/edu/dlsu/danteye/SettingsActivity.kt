@@ -2,7 +2,10 @@ package edu.dlsu.danteye
 
 import android.app.Activity
 import android.content.Context
+import android.content.res.ColorStateList
 import android.graphics.BitmapFactory
+import android.graphics.Color
+import android.graphics.drawable.GradientDrawable
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.os.Bundle
@@ -30,19 +33,37 @@ class SettingsActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        window.statusBarColor = Ui.navy
-        window.navigationBarColor = Ui.navy
-        val scroller = ScrollView(this).apply { setBackgroundColor(Ui.background) }
+
+        window.statusBarColor = Color.rgb(58, 23, 34)
+        window.navigationBarColor = Ui.background
+
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Ui.background)
+        }
+
+        // Same header used by the other DantEye pages.
+        root.addView(Ui.header(this, "Device Settings"))
+
+        val scroller = ScrollView(this).apply {
+            isFillViewport = true
+            setBackgroundColor(Ui.background)
+        }
+
         val body = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(Ui.dp(this@SettingsActivity, 16), Ui.dp(this@SettingsActivity, 16),
                 Ui.dp(this@SettingsActivity, 16), Ui.dp(this@SettingsActivity, 28))
         }
+
         scroller.addView(body)
-        setContentView(scroller)
+        root.addView(
+            scroller,
+            LinearLayout.LayoutParams( -1, 0, 1f)
+        )
+        setContentView(root)
 
-        body.addView(Ui.title(this, "Device settings"))
-
+        // Camera Wi-Fi configuration.
         val pairing = Ui.card(this)
 
         pairing.addView(Ui.note(this, "Camera Wi-Fi name"))
@@ -50,17 +71,24 @@ class SettingsActivity : Activity() {
             prefs.getString("camera_ssid", "DMS-CAM") ?: "DMS-CAM")
         pairing.addView(ssid)
 
-        pairing.addView(Ui.note(this, "New Wi-Fi password (8–63 characters)"))
-        password = field("New Wi-Fi password (8–63 characters)", "").apply {
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+        pairing.addView(
+            Ui.note(this, "New Wi-Fi password (8–63 characters)")
+        )
+        password = field(
+            "New Wi-Fi password (8–63 characters)",
+            ""
+        ).apply {
+            inputType = InputType.TYPE_CLASS_TEXT or
+                    InputType.TYPE_TEXT_VARIATION_PASSWORD
         }
         pairing.addView(password)
 
         pairing.addView(action("Send Wi-Fi credentials") { provisionCamera() })
         body.addView(pairing, Ui.blockParams(this))
 
+        // Camera and sensor endpoints.
         val endpoints = Ui.card(this)
-        endpoints.addView(Ui.title(this, "Device addresses"))
+        endpoints.addView(Ui.title(this, "Device Addresses"))
 
         endpoints.addView(Ui.note(this, "Camera base URL"))
         cameraUrl = field("Camera base URL", prefs.getString("camera_url", "http://192.168.4.1") ?: "http://192.168.4.1")
@@ -88,6 +116,16 @@ class SettingsActivity : Activity() {
         }
         endpoints.addView(snapshot, LinearLayout.LayoutParams(-1, -2))
         body.addView(endpoints, Ui.blockParams(this))
+
+        // Feedback area for all device operations.
+        val feedback = Ui.card(this)
+        feedback.addView(Ui.eyebrow(this, "DEVICE STATUS"))
+
+        status = Ui.note(this, "Ready.").apply {
+            setTextColor(Ui.navy)
+        }
+        feedback.addView(status)
+        body.addView(feedback, Ui.blockParams(this))
     }
 
     private fun field(hintText: String, initial: String) = EditText(this).apply {
@@ -96,24 +134,77 @@ class SettingsActivity : Activity() {
         setText(initial)
         textSize = 15f
         setSelectAllOnFocus(true)
-        setPadding(Ui.dp(this@SettingsActivity, 8), Ui.dp(this@SettingsActivity, 10),
-            Ui.dp(this@SettingsActivity, 8), Ui.dp(this@SettingsActivity, 10))
+
+        setTextColor(Color.rgb(245, 232, 235))
+        setHintTextColor(Color.rgb(184, 150, 159))
+        setHighlightColor(Color.rgb(130, 40, 60))
+
+        background = GradientDrawable().apply {
+            setColor(Color.rgb(49, 26, 35))
+            cornerRadius =
+                Ui.dp(this@SettingsActivity, 10).toFloat()
+        }
+
+        setPadding(
+            Ui.dp(this@SettingsActivity, 12),
+            Ui.dp(this@SettingsActivity, 12),
+            Ui.dp(this@SettingsActivity, 12),
+            Ui.dp(this@SettingsActivity, 12)
+        )
+
+        minimumHeight = Ui.dp(this@SettingsActivity, 48)
     }
 
-    private fun action(label: String, callback: () -> Unit) = Button(this).apply {
+    // Matching DantEye dark-red buttons.
+    private fun action(
+        label: String,
+        callback: () -> Unit
+    ) = Button(this).apply {
         text = label
         isAllCaps = false
+        textSize = 14f
+
+        setTextColor(Color.rgb(255, 240, 243))
+
+        backgroundTintList = ColorStateList.valueOf(
+            Color.rgb(130, 40, 60)
+        )
+
+        setPadding(
+            Ui.dp(this@SettingsActivity, 16),
+            Ui.dp(this@SettingsActivity, 12),
+            Ui.dp(this@SettingsActivity, 16),
+            Ui.dp(this@SettingsActivity, 12)
+        )
+
+        minimumHeight = Ui.dp(this@SettingsActivity, 48)
         setOnClickListener { callback() }
     }
 
     private fun normalizedBase(text: String, optional: Boolean = false): String {
         val value = text.trim().trimEnd('/')
         if (optional && value.isEmpty()) return ""
+
         val url = URL(value)
-        require(url.protocol == "http" || url.protocol == "https") { "Address must start with http:// or https://" }
-        require(url.host.isNotBlank() && url.userInfo == null) { "Enter a valid URL without credentials" }
-        require(url.path.isEmpty() || url.path == "/") { "Enter only the base URL, for example http://192.168.4.1" }
-        require(url.query == null && url.ref == null) { "Remove URL queries and fragments" }
+        require(
+            url.protocol == "http" ||
+                    url.protocol == "https"
+        ) {
+            "Address must start with http:// or https://"
+        }
+        require(
+            url.host.isNotBlank() && url.userInfo == null
+        ) {
+            "Enter a valid URL without credentials"
+        }
+        require(
+            url.path.isEmpty() || url.path == "/"
+        ) {
+            "Enter only the base URL, for example http://192.168.4.1"
+        }
+        require(url.query == null && url.ref == null) {
+            "Remove URL queries and fragments"
+        }
         return value
     }
 
@@ -122,9 +213,21 @@ class SettingsActivity : Activity() {
             val camera = normalizedBase(cameraUrl.text.toString())
             val sensor = normalizedBase(sensorUrl.text.toString(), optional = true)
             val interval = pollMs.text.toString().toInt()
-            require(interval in 200..60000) { "Polling interval must be 200–60000 ms" }
-            prefs.edit().putString("camera_url", camera).putString("sensor_url", sensor)
-                .putString("camera_ssid", ssid.text.toString().trim()).putInt("poll_ms", interval).apply()
+
+            require(interval in 200..60000) {
+                "Polling interval must be 200–60000 ms"
+            }
+
+            prefs.edit()
+                .putString("camera_url", camera)
+                .putString("sensor_url", sensor)
+                .putString(
+                    "camera_ssid",
+                    ssid.text.toString().trim()
+                )
+                .putInt("poll_ms", interval)
+                .apply()
+
             show("Saved locally.")
         } catch (e: Exception) { show("Could not save settings. ${e.message}") }
     }
@@ -151,11 +254,13 @@ class SettingsActivity : Activity() {
         connection.readTimeout = 4000
         connection.requestMethod = method
         connection.useCaches = false
+
         if (form != null) {
             connection.doOutput = true
             connection.setRequestProperty("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8")
             connection.outputStream.use { it.write(form.toByteArray(Charsets.UTF_8)) }
         }
+
         return connection
     }
 
@@ -173,12 +278,23 @@ class SettingsActivity : Activity() {
     private fun provisionCamera() {
         val newSsid = ssid.text.toString().trim()
         val newPassword = password.text.toString()
+
         if (!Regex("[A-Za-z0-9_-]{3,32}").matches(newSsid)) {
-            show("Wi-Fi name must contain 3–32 letters, numbers, hyphens or underscores."); return
+            show(
+                "Wi-Fi name must contain 3–32 letters, " +
+                        "numbers, hyphens or underscores."
+            )
+            return
         }
-        if (newPassword.length !in 8..63 || newPassword.any { it.code !in 32..126 }) {
-            show("Wi-Fi password must have 8–63 characters."); return
+
+        if (
+            newPassword.length !in 8..63 ||
+            newPassword.any { it.code !in 32..126 }
+        ) {
+            show("Wi-Fi password must have 8–63 characters.")
+            return
         }
+
         onWorker("Provisioning camera") {
             val form = "ssid=" + URLEncoder.encode(newSsid, "UTF-8") +
                 "&password=" + URLEncoder.encode(newPassword, "UTF-8")
@@ -193,38 +309,90 @@ class SettingsActivity : Activity() {
     }
 
     private fun checkStatus() {
-        val base = try { normalizedBase(cameraUrl.text.toString()) }
-        catch (e: Exception) { show("Invalid camera URL. ${e.message}"); return }
-        onWorker("Checking camera") {
-        val response = JSONObject(requestText("$base/api/status"))
-        runOnUiThread {
-            show("Camera mode ${response.optString("mode", "?")}; Wi-Fi ${response.optString("ssid", "?")}; IP ${response.optString("ip", "?")}; camera initialized ${response.optBoolean("cameraReady", false)}")
+        val base = try {
+            normalizedBase(cameraUrl.text.toString())
+        } catch (e: Exception) {
+            show("Invalid camera URL. ${e.message}")
+            return
         }
+
+        onWorker("Checking camera") {
+            val response = JSONObject(
+                requestText("$base/api/status")
+            )
+
+            runOnUiThread {
+                show(
+                    "Camera mode " +
+                            "${response.optString("mode", "?")}; " +
+                            "Wi-Fi " +
+                            "${response.optString("ssid", "?")}; " +
+                            "IP " +
+                            "${response.optString("ip", "?")}; " +
+                            "camera initialized " +
+                            "${response.optBoolean("cameraReady", false)}"
+                )
+            }
         }
     }
 
     private fun testSnapshot() {
-        val base = try { normalizedBase(cameraUrl.text.toString()) }
-        catch (e: Exception) { show("Invalid camera URL. ${e.message}"); return }
+        val base = try {
+            normalizedBase(cameraUrl.text.toString())
+        } catch (e: Exception) {
+            show("Invalid camera URL. ${e.message}")
+            return
+        }
+
         onWorker("Testing camera photo") {
-        val connection = connect("$base/jpg")
-        try {
-            require(connection.responseCode == 200) { "HTTP ${connection.responseCode}" }
-            require(connection.contentType?.startsWith("image/jpeg") == true) { "Not a JPEG response" }
-            val bitmap = connection.inputStream.use { BitmapFactory.decodeStream(it) }
-            require(bitmap != null) { "Could not decode camera JPEG" }
-            runOnUiThread {
-                snapshot.setImageBitmap(bitmap)
-                show("Camera photo received: ${bitmap.width} × ${bitmap.height}.")
+            val connection = connect("$base/jpg")
+            try {
+                require(connection.responseCode == 200) {
+                    "HTTP ${connection.responseCode}"
+                }
+                require(
+                    connection.contentType
+                        ?.startsWith("image/jpeg") == true
+                ) {
+                    "Not a JPEG response"
+                }
+
+                val bitmap = connection.inputStream.use {
+                    BitmapFactory.decodeStream(it)
+                }
+                require(bitmap != null) {
+                    "Could not decode camera JPEG"
+                }
+
+                runOnUiThread {
+                    snapshot.setImageBitmap(bitmap)
+                    show(
+                        "Camera photo received: " +
+                                "${bitmap.width} × ${bitmap.height}."
+                    )
+                }
+            } finally {
+                connection.disconnect()
             }
-        } finally { connection.disconnect() }
         }
     }
 
     private fun testSensors() {
-        val base = try { normalizedBase(sensorUrl.text.toString(), optional = true) }
-        catch (e: Exception) { show("Invalid sensor URL. ${e.message}"); return }
-        if (base.isEmpty()) { show("Enter a sensor endpoint first."); return }
+        val base = try {
+            normalizedBase(
+                sensorUrl.text.toString(),
+                optional = true
+            )
+        } catch (e: Exception) {
+            show("Invalid sensor URL. ${e.message}")
+            return
+        }
+
+        if (base.isEmpty()) {
+            show("Enter a sensor endpoint first.")
+            return
+        }
+
         onWorker("Testing sensors") {
             val json = JSONObject(requestText("$base/sensors"))
             runOnUiThread {
