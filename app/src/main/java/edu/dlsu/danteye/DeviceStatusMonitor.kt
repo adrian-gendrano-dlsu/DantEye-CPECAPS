@@ -1,4 +1,4 @@
-package edu.dlsu.esca_3_2526_c3
+package edu.dlsu.danteye
 
 import android.content.Context
 import android.graphics.Bitmap

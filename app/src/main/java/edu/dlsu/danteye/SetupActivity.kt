@@ -1,8 +1,8 @@
-package edu.dlsu.esca_3_2526_c3
+package edu.dlsu.danteye
 
 import android.Manifest
+import android.R
 import android.app.Activity
-import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
@@ -22,7 +22,7 @@ import kotlin.math.abs
 
 /** Setup guide */
 class SetupActivity : Activity() {
-    private val prefs by lazy { getSharedPreferences("driver_setup_v1", Context.MODE_PRIVATE) }
+    private val prefs by lazy { getSharedPreferences("driver_setup_v1", MODE_PRIVATE) }
     private val handler = Handler(Looper.getMainLooper())
     private val devices by lazy { DeviceStatusMonitor(this) { refreshDeviceViews() } }
     private lateinit var content: LinearLayout
@@ -206,7 +206,7 @@ class SetupActivity : Activity() {
         })
         countdown = Ui.note(this, "Ready for a 5-second pose check")
         card.addView(countdown)
-        progress = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
+        progress = ProgressBar(this, null, R.attr.progressBarStyleHorizontal).apply {
             max = 5000
             progress = 0
         }

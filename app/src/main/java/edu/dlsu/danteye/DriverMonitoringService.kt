@@ -1,5 +1,7 @@
-package edu.dlsu.esca_3_2526_c3
+package edu.dlsu.danteye
 
+import android.Manifest
+import android.R
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -7,6 +9,7 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.Color
 import android.os.Build
 import android.os.Handler
@@ -19,6 +22,8 @@ import androidx.core.app.NotificationCompat
 import com.google.firebase.FirebaseApp
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.database.FirebaseDatabase
+import edu.dlsu.danteye.LauncherActivity
+import edu.dlsu.danteye.SessionHistoryStore
 import java.util.Locale
 import java.util.UUID
 
@@ -27,9 +32,9 @@ class DriverMonitoringService : Service(), TextToSpeech.OnInitListener {
     // Shared commands and session state used by the driver activity and this service.
     companion object {
         // distinguish start, stop, and HIGH alerts.
-        const val START = "edu.dlsu.esca_3_2526_c3.START_MONITORING"
-        const val STOP = "edu.dlsu.esca_3_2526_c3.STOP_MONITORING"
-        const val HIGH_ALERT = "edu.dlsu.esca_3_2526_c3.DEMO_HIGH_ALERT"
+        const val START = "edu.dlsu.danteye.START_MONITORING"
+        const val STOP = "edu.dlsu.danteye.STOP_MONITORING"
+        const val HIGH_ALERT = "edu.dlsu.danteye.DEMO_HIGH_ALERT"
 
         // Preference keys, notification channels, and the two-hour reminder interval.
         private const val PREFS = "driver_monitoring_v1"
@@ -80,7 +85,7 @@ class DriverMonitoringService : Service(), TextToSpeech.OnInitListener {
         /** Read session metadata once when the process initializes. */
         fun restore(context: Context) {
             if (restored) return
-            val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            val prefs = context.getSharedPreferences(PREFS, MODE_PRIVATE)
             active = prefs.getBoolean("active", false)
             sessionStarted = prefs.getLong("started", 0L)
             sessionId = prefs.getString("session", "") ?: ""
@@ -101,7 +106,7 @@ class DriverMonitoringService : Service(), TextToSpeech.OnInitListener {
             statuses.keys.forEach { statuses[it] = "Normal" }
             resetHandler.removeCallbacksAndMessages(null)
             recent.clear()
-            context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            context.getSharedPreferences(PREFS, MODE_PRIVATE).edit()
                 .putBoolean("active", true).putLong("started", sessionStarted)
                 .putString("session", sessionId).putLong("lastBreak", 0L).apply()
 
@@ -114,7 +119,7 @@ class DriverMonitoringService : Service(), TextToSpeech.OnInitListener {
             SessionHistoryStore.stop(context, sessionId)
 
             active = false
-            context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            context.getSharedPreferences(PREFS, MODE_PRIVATE).edit()
                 .putBoolean("active", false).apply()
             resetHandler.removeCallbacksAndMessages(null)
             statuses.keys.forEach { statuses[it] = "Normal" }
@@ -136,7 +141,7 @@ class DriverMonitoringService : Service(), TextToSpeech.OnInitListener {
 
             // Each completed two-hour interval should generate only one reminder.
             val interval = elapsed / BREAK_MS
-            val prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
             if (interval > 0 && interval > prefs.getLong("lastBreak", 0L)) {
                 prefs.edit().putLong("lastBreak", interval).apply()
                 val hours = interval * 2
@@ -239,7 +244,7 @@ class DriverMonitoringService : Service(), TextToSpeech.OnInitListener {
         )
         val minutes = ((System.currentTimeMillis() - sessionStarted).coerceAtLeast(0L) / 60_000L)
         return NotificationCompat.Builder(this, CHANNEL_ACTIVE)
-            .setSmallIcon(android.R.drawable.ic_menu_view)
+            .setSmallIcon(R.drawable.ic_menu_view)
             .setContentTitle("Driver monitoring service is running")
             .setContentText("$minutes min")
             .setContentIntent(launch)
@@ -251,20 +256,20 @@ class DriverMonitoringService : Service(), TextToSpeech.OnInitListener {
     /** Post a supplemental phone alert if notification permission is available. */
     private fun notifyAlert(title: String, message: String, id: Int) {
         val notification = NotificationCompat.Builder(this, CHANNEL_ALERT)
-            .setSmallIcon(android.R.drawable.ic_dialog_alert)
+            .setSmallIcon(R.drawable.ic_dialog_alert)
             .setContentTitle(title).setContentText(message)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setAutoCancel(true).build()
         // Phone notifications are supplementary; no prototype buzzer API exists in this commit.
         if (Build.VERSION.SDK_INT >= 33 &&
-            checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) !=
-            android.content.pm.PackageManager.PERMISSION_GRANTED) return
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) !=
+            PackageManager.PERMISSION_GRANTED) return
         getSystemService(NotificationManager::class.java).notify(id, notification)
     }
 
     /** Use a short vibration pattern, with compatibility for older Android versions. */
     private fun vibrate() {
-        val vibrator = getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
+        val vibrator = getSystemService(VIBRATOR_SERVICE) as Vibrator
         if (Build.VERSION.SDK_INT >= 26) {
             vibrator.vibrate(VibrationEffect.createWaveform(longArrayOf(0, 300, 150, 300, 150, 500), -1))
         } else {

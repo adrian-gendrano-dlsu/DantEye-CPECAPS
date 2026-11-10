@@ -1,4 +1,4 @@
-package edu.dlsu.esca_3_2526_c3
+package edu.dlsu.danteye
 
 import android.app.Activity
 import android.content.Intent
@@ -6,6 +6,7 @@ import android.graphics.Color
 import android.os.Bundle
 import android.text.InputType
 import android.text.method.PasswordTransformationMethod
+import android.util.Patterns
 import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
@@ -97,7 +98,7 @@ class LauncherActivity : Activity() {
             val secret = password.text.toString()
             when {
                 FirebaseApp.getApps(this).isEmpty() -> feedback.text = "Firebase is unavailable."
-                !android.util.Patterns.EMAIL_ADDRESS.matcher(address).matches() -> feedback.text = "Enter a valid email."
+                !Patterns.EMAIL_ADDRESS.matcher(address).matches() -> feedback.text = "Enter a valid email."
                 secret.length < 6 -> feedback.text = "Use at least 6 password characters."
                 signingUp && confirmation?.text.toString() != secret -> feedback.text = "Passwords do not match."
                 else -> {
@@ -119,7 +120,7 @@ class LauncherActivity : Activity() {
         })
         if (!signingUp) card.addView(button("Forgot password?") {
             val address = email.text.toString().trim()
-            if (!android.util.Patterns.EMAIL_ADDRESS.matcher(address).matches()) {
+            if (!Patterns.EMAIL_ADDRESS.matcher(address).matches()) {
                 feedback.text = "Enter your email first."
             } else FirebaseAuth.getInstance().sendPasswordResetEmail(address)
                 .addOnSuccessListener { feedback.text = "Check your email for reset instructions." }
