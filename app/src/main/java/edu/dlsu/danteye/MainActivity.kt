@@ -55,7 +55,6 @@ class MainActivity : Activity() {
     private var manualCoordinates: Pair<Double, Double>? = null
     private var dashboardTaps = 0
     private var firstDashboardTap = 0L
-    private var nightMode = false
 
     // The HIGH-risk animation must be cancelled before rebuilding the page.
     private var borderPulse: ValueAnimator? = null
@@ -80,8 +79,6 @@ class MainActivity : Activity() {
         super.onCreate(savedInstanceState)
         developerSessionEnabled = false
         DriverMonitoringService.restore(this)
-        nightMode = getSharedPreferences("driver_display", MODE_PRIVATE).getBoolean("night", false)
-        Ui.nightMode = nightMode
         window.statusBarColor = Ui.navy
         window.navigationBarColor = Ui.navy
 
@@ -90,7 +87,7 @@ class MainActivity : Activity() {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(Ui.canvas)
         }
-        root.addView(Ui.header(this, "Driver Safety Console").apply {
+        root.addView(Ui.header(this, "DantEye - Safety Console").apply {
             setOnClickListener { onDashboardTap() }
         })
         scroller = ScrollView(this).apply {
@@ -164,7 +161,6 @@ class MainActivity : Activity() {
     /** Resume receiving service updates when the app becomes visible. */
     override fun onResume() {
         super.onResume()
-        Ui.nightMode = nightMode
         DriverMonitoringService.onChange = { if (!isFinishing && !isDestroyed && !onAccount) updateVisiblePage() }
 
         // Account sign-in may have changed while another screen was open.
@@ -182,7 +178,6 @@ class MainActivity : Activity() {
     override fun onPause() {
         devices.stop()
         DriverMonitoringService.onChange = null
-        Ui.nightMode = false
         super.onPause()
     }
 
@@ -238,16 +233,6 @@ class MainActivity : Activity() {
             cloud.clearLocation()
         }
         if (running) startService(intent) else ContextCompat.startForegroundService(this, intent)
-    }
-
-    /** Save the night-mode preference and repaint the current page. */
-    private fun switchNightMode() {
-        nightMode = !nightMode
-        Ui.nightMode = nightMode
-        getSharedPreferences("driver_display", MODE_PRIVATE).edit().putBoolean("night", nightMode).apply()
-        root.setBackgroundColor(Ui.canvas)
-        tabs.setBackgroundColor(Ui.surface)
-        updateVisiblePage()
     }
 
     /** Seven header taps - toggle UI-only test controls. */
@@ -417,19 +402,15 @@ class MainActivity : Activity() {
             "Signed in as ${cloud.email}" else "Not signed in · Open Account to sign in"))
 
         // Side-by-side shortcuts avoid another row of full-width buttons.
+
         val shortcuts = LinearLayout(this)
-        shortcuts.addView(Button(this).apply {
-            text = if (nightMode) "Day mode" else "Night mode"
-            isAllCaps = false
-            if (nightMode) { backgroundTintList = ColorStateList.valueOf(Ui.navy); setTextColor(Color.WHITE) }
-            setOnClickListener { switchNightMode() }
-        }, LinearLayout.LayoutParams(0, Ui.dp(this, 48), 1f))
         shortcuts.addView(Button(this).apply {
             text = "View details"
             isAllCaps = false
-            if (nightMode) { backgroundTintList = ColorStateList.valueOf(Ui.navy); setTextColor(Color.WHITE) }
+            backgroundTintList = ColorStateList.valueOf(Color.rgb(130, 40, 60))
+            setTextColor(Ui.navy)
             setOnClickListener { showDetails() }
-        }, LinearLayout.LayoutParams(0, Ui.dp(this, 48), 1f))
+        }, LinearLayout.LayoutParams(-1, Ui.dp(this, 48)))
         overview.addView(shortcuts)
         overview.addView(Ui.note(this, "Setup guide & camera alignment  ›").apply {
             setPadding(0, Ui.dp(this@MainActivity, 12), 0, Ui.dp(this@MainActivity, 8))
@@ -452,7 +433,8 @@ class MainActivity : Activity() {
             setSingleLine(true)
             textSize = 14f
             setText(manualCoordinates?.first?.toString() ?: "")
-            if (nightMode) { setTextColor(Color.WHITE); setHintTextColor(Color.LTGRAY) }
+            setTextColor(Ui.navy)
+            setHintTextColor(Ui.muted)
         }
         val longitude = EditText(this).apply {
             hint = "Longitude (-180 to 180)"
@@ -460,7 +442,8 @@ class MainActivity : Activity() {
             setSingleLine(true)
             textSize = 14f
             setText(manualCoordinates?.second?.toString() ?: "")
-            if (nightMode) { setTextColor(Color.WHITE); setHintTextColor(Color.LTGRAY) }
+            setTextColor(Ui.navy)
+            setHintTextColor(Ui.muted)
         }
         card.addView(latitude)
         card.addView(longitude)
@@ -534,7 +517,8 @@ class MainActivity : Activity() {
         metrics.addView(Button(this).apply {
             text = "Back to Driving mode"
             isAllCaps = false
-            if (nightMode) { backgroundTintList = ColorStateList.valueOf(Ui.navy); setTextColor(Color.WHITE) }
+            backgroundTintList = ColorStateList.valueOf(Color.rgb(130, 40, 60))
+            setTextColor(Ui.navy)
             setOnClickListener { showHome() }
         })
         page.addView(metrics, Ui.blockParams(this))
@@ -576,7 +560,7 @@ class MainActivity : Activity() {
                 text = sessionDate(session.startedMs)
                 textSize = 15f
                 setTypeface(null, Typeface.BOLD)
-                setTextColor(if (nightMode) Color.WHITE else Ui.navy)
+                setTextColor(Ui.navy)
             })
             summary.addView(Ui.note(this, sessionMinutes(session.durationMs()) +
                     if (session.active && DriverMonitoringService.active && DriverMonitoringService.sessionId == session.id)
@@ -589,7 +573,7 @@ class MainActivity : Activity() {
             }))
             row.addView(ImageButton(this).apply {
                 setImageResource(android.R.drawable.ic_menu_share)
-                imageTintList = ColorStateList.valueOf(if (nightMode) Color.WHITE else Ui.muted)
+                imageTintList = ColorStateList.valueOf(Ui.muted)
                 setBackgroundColor(Color.TRANSPARENT)
                 contentDescription = "Share session log"
                 setPadding(Ui.dp(this@MainActivity, 12), Ui.dp(this@MainActivity, 12),
@@ -758,10 +742,10 @@ class MainActivity : Activity() {
             } else null
             confirmation?.let { account.addView(it) }
 
-            // Set text colors for night mode
-            if (nightMode) listOfNotNull(email, password, confirmation).forEach {
-                it.setTextColor(Color.WHITE)
-                it.setHintTextColor(Color.LTGRAY)
+            listOfNotNull(email, password, confirmation).forEach {
+                it.setTextColor(Ui.navy)
+                it.setHintTextColor(Ui.muted)
+                it.setBackgroundColor(Color.rgb(49, 26, 35))
             }
 
             val feedback = TextView(this).apply { setTextColor(Ui.red); textSize = 14f }

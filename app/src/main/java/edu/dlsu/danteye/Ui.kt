@@ -18,9 +18,9 @@ object Ui {
     val white = Color.rgb(39, 21, 28)
     val muted = Color.rgb(184, 150, 159)
     val blue = Color.rgb(228, 91, 112)
-    val green = Color.rgb(112, 216, 166)
+    val green = Color.rgb(22, 163, 74)
     val amber = Color.rgb(255, 185, 99)
-    val red = Color.rgb(255, 99, 120)
+    val red = Color.rgb(220, 38, 38)
     val yellow = Color.rgb(250, 204, 21)
 
     /** One visible LOW / MEDIUM / HIGH scale, including older Firebase event values. */
@@ -47,18 +47,14 @@ object Ui {
 
     /** device indicator */
     fun deviceIndicator(c: Context, label: String, working: Boolean) =
-        text(c, label, 12f, white, true).apply {
+        text(c, label, 12f, Color.WHITE, true).apply {
             gravity = Gravity.CENTER
             setPadding(dp(c, 5), dp(c, 8), dp(c, 5), dp(c, 8))
             background = shape(if (working) green else red, c, 8)
         }
 
-
-    // Night mode changes the page and card backgrounds without changing risk colors.
-    var nightMode = false
-    val canvas: Int get() = if (nightMode) Color.rgb(9, 15, 28) else background
-    val surface: Int get() = if (nightMode) Color.rgb(29, 38, 55) else white
-
+    val canvas = background
+    val surface = white
 
     /** Convert density-independent pixels to physical pixels */
     fun dp(c: Context, n: Int): Int = (n * c.resources.displayMetrics.density + 0.5f).toInt()
@@ -78,12 +74,7 @@ object Ui {
             this.text = value
             textSize = size
 
-            // Replace dark foreground colors so labels remain legible at night.
-            setTextColor(when {
-                nightMode && color == navy -> white
-                nightMode && color == muted -> Color.rgb(203, 213, 225)
-                else -> color
-            })
+            setTextColor(color)
 
             if (bold) setTypeface(null, Typeface.BOLD)
         }
@@ -157,8 +148,7 @@ object Ui {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
 
-            // Use a darker placeholder surface in night mode.
-            background = shape(if (nightMode) Color.rgb(44, 55, 72) else Color.rgb(232, 239, 248), c, 12)
+            background = shape(Color.rgb(49, 26, 35), c, 12)
 
             addView(text(c, heading, 15f, navy, true))
             addView(text(c, detail, 12f, muted))
@@ -221,12 +211,13 @@ object Ui {
 
     /** Visually distinguish the selected navigation tab from inactive tabs. */
     fun activeTab(view: TextView, active: Boolean) {
-        // Use brighter text for the active tab when night mode is enabled.
-        view.setTextColor(if (active) (if (nightMode) Color.rgb(147, 197, 253) else blue) else (if (nightMode) Color.LTGRAY else muted))
+        view.setTextColor(if (active) blue else muted)
         view.setTypeface(null, if (active) Typeface.BOLD else Typeface.NORMAL)
 
-        // Match the selected-tab background to the current theme.
-        view.background = shape(if (active) (if (nightMode) Color.rgb(45, 59, 85) else Color.rgb(235, 241, 253)) else surface, view.context, 12)
+        view.background = shape(
+            if (active) Color.rgb(86, 35, 49) else surface,
+            view.context, 12
+        )
     }
 
 
@@ -237,7 +228,7 @@ object Ui {
         orientation = LinearLayout.HORIZONTAL
         gravity = Gravity.CENTER_VERTICAL
         setPadding(dp(c, 12), dp(c, 12), dp(c, 12), dp(c, 12))
-        background = shape(if (selected) Color.rgb(232, 239, 253) else Ui.background, c, 10)
+        background = shape(if (selected) Color.rgb(86, 35, 49) else Ui.background, c, 10)
         val content = LinearLayout(c).apply {
             orientation = LinearLayout.VERTICAL
             addView(text(c, name, 15f, navy, true))

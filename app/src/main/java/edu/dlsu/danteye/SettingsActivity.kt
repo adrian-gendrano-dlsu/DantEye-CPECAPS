@@ -3,6 +3,7 @@ package edu.dlsu.danteye
 import android.app.Activity
 import android.content.Context
 import android.content.Intent
+import android.content.res.ColorStateList
 import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.net.ConnectivityManager
@@ -51,7 +52,6 @@ class SettingsActivity : Activity() {
 
         // Monitoring state determines whether the configuration is read-only.
         DriverMonitoringService.restore(this)
-        Ui.nightMode = getSharedPreferences("driver_display", MODE_PRIVATE).getBoolean("night", false)
         window.statusBarColor = Color.rgb(58, 23, 34)
         window.navigationBarColor = Color.rgb(58, 23, 34)
 
@@ -203,10 +203,9 @@ class SettingsActivity : Activity() {
         setText(initial)
         textSize = 15f
         setSelectAllOnFocus(true)
-        if (Ui.nightMode) {
-            setTextColor(Color.rgb(245, 232, 235))
-            setHintTextColor(Color.rgb(184, 150, 159))
-        }
+        setTextColor(Ui.navy)
+        setHintTextColor(Ui.muted)
+        setBackgroundColor(Color.rgb(49, 26, 35))
         setPadding(Ui.dp(this@SettingsActivity, 8), Ui.dp(this@SettingsActivity, 10),
             Ui.dp(this@SettingsActivity, 8), Ui.dp(this@SettingsActivity, 10))
         controls.add(this)
@@ -232,6 +231,8 @@ class SettingsActivity : Activity() {
     private fun action(label: String, callback: () -> Unit) = Button(this).apply {
         text = label
         isAllCaps = false
+        setTextColor(Ui.navy)
+        backgroundTintList = ColorStateList.valueOf(Color.rgb(130, 40, 60))
         setOnClickListener { callback() }
         controls.add(this)
     }
@@ -242,7 +243,7 @@ class SettingsActivity : Activity() {
         val indicator = TextView(this).apply {
             text = "○ Not run"
             textSize = 12f
-            setTextColor(if (Ui.nightMode) Color.LTGRAY else Ui.muted)
+            setTextColor(Ui.muted)
             setPadding(Ui.dp(this@SettingsActivity, 6), 0, 0, 0)
         }
         val detail = Ui.note(this, "")
@@ -264,7 +265,7 @@ class SettingsActivity : Activity() {
         result.indicator.setTextColor(when (success) {
             true -> Ui.green
             false -> Ui.red
-            null -> if (Ui.nightMode) Color.LTGRAY else Ui.muted
+            null -> Ui.muted
         })
         result.detail.text = message
         result.indicator.contentDescription = "${result.indicator.text}. $message"

@@ -69,7 +69,6 @@ class SetupActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        Ui.nightMode = getSharedPreferences("driver_display", MODE_PRIVATE).getBoolean("night", false)
         window.statusBarColor = Ui.navy
         window.navigationBarColor = Ui.navy
         step = savedInstanceState?.getInt("step") ?: 0

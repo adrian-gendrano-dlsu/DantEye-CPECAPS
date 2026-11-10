@@ -241,7 +241,7 @@ class SupervisorActivity : Activity() {
         val scrollY = if (::scroll.isInitialized) scroll.scrollY else 0
         content.removeAllViews()
         ageLabels.clear()
-        content.addView(Ui.header(this, "Supervisor Dashboard"))
+        content.addView(Ui.header(this, "DantEye - Supervisor Dashboard"))
         val account = Ui.card(this)
         account.addView(Ui.note(this, cloud.connectionLabel))
         account.addView(Ui.note(this, "Cloud data restricted to supervisor accounts."))

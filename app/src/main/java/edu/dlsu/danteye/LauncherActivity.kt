@@ -25,7 +25,6 @@ class LauncherActivity : Activity() {
         super.onCreate(savedInstanceState)
         window.statusBarColor = Ui.navy
         window.navigationBarColor = Ui.navy
-        Ui.nightMode = getSharedPreferences("driver_display", MODE_PRIVATE).getBoolean("night", false)
         val scroll = ScrollView(this).apply { setBackgroundColor(Ui.background) }
         content = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -41,7 +40,7 @@ class LauncherActivity : Activity() {
 
     private fun showMessage(message: String) {
         content.removeAllViews()
-        content.addView(Ui.title(this, "ESCA-3-2526-C3"))
+        content.addView(Ui.title(this, "DantEye"))
         val card = Ui.card(this)
         card.addView(Ui.note(this, message))
         if (FirebaseApp.getApps(this).isNotEmpty()) {
@@ -57,6 +56,10 @@ class LauncherActivity : Activity() {
     private fun button(label: String, click: () -> Unit) = Button(this).apply {
         text = label
         isAllCaps = false
+        setTextColor(Ui.navy)
+        backgroundTintList = android.content.res.ColorStateList.valueOf(
+            Color.rgb(130, 40, 60)
+        )
         setOnClickListener { click() }
     }
 
@@ -69,15 +72,14 @@ class LauncherActivity : Activity() {
             transformationMethod = PasswordTransformationMethod.getInstance()
         }
         textSize = 14f
-        if (Ui.nightMode) {
-            setTextColor(Color.WHITE)
-            setHintTextColor(Color.LTGRAY)
-        }
+        setTextColor(Ui.navy)
+        setHintTextColor(Ui.muted)
+        setBackgroundColor(Color.rgb(49, 26, 35))
     }
 
     private fun showLogin() {
         content.removeAllViews()
-        content.addView(Ui.title(this, "ESCA-3-2526-C3"))
+        content.addView(Ui.title(this, "DantEye"))
 
         val card = Ui.card(this)
         card.addView(Ui.title(this, if (signingUp) "Create account" else "Sign in"))
