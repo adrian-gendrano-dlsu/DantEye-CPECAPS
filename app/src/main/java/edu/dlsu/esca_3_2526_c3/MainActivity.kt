@@ -78,7 +78,6 @@ class MainActivity : Activity() {
     private lateinit var scroller: ScrollView
     private lateinit var homeTab: TextView
     private lateinit var historyTab: TextView
-    private lateinit var accountTab: TextView
     private lateinit var settingsTab: TextView
     private var statusStrip: LinearLayout? = null
     private var cameraFrame: LinearLayout? = null
@@ -145,7 +144,6 @@ class MainActivity : Activity() {
 
         homeTab = Ui.tab(this, "⌂  Home") { showHome() }.apply { textSize = 13f }
         historyTab = Ui.tab(this, "◷  History") { showHistory() }.apply { textSize = 13f }
-        accountTab = Ui.tab(this, "Account") { showAccount() }.apply { textSize = 13f }
         settingsTab = Ui.tab(this, "⚙  Settings") { showSettings() }.apply { textSize = 13f }
 
         tabs.addView(homeTab, LinearLayout.LayoutParams(0, Ui.dp(this, 48), 1f))
@@ -493,7 +491,6 @@ class MainActivity : Activity() {
         onSettings = settings
         Ui.activeTab(homeTab, home)
         Ui.activeTab(historyTab, !home && !account && !settings)
-        Ui.activeTab(accountTab, account) // Account is opened from Settings (not a tab of its own)
         Ui.activeTab(settingsTab, settings || account)
         borderPulse?.cancel()
         borderPulse = null
@@ -660,7 +657,7 @@ class MainActivity : Activity() {
         overview.addView(Ui.space(this, 8))
         addConnectionStrip(overview)
         overview.addView(Ui.note(this, if (cloud.signedIn)
-            "Signed in as ${cloud.email}" else "Not signed in · Open Account to sign in"))
+            "Signed in as ${cloud.email}" else "Not signed in · Open Settings to sign in"))
 
         // Side-by-side shortcuts avoid another row of full-width buttons.
         val shortcuts = LinearLayout(this)
@@ -814,7 +811,7 @@ class MainActivity : Activity() {
         history.addView(Ui.title(this, "Session History"))
         val waiting = cloud.pendingCount
         history.addView(Ui.note(this, if (waiting == 0) "✓ Everything is synced with the supervisor."
-            else "⟳ $waiting item${if (waiting == 1) "" else "s"} waiting to be sent to the supervisor. ${cloud.connectionLabel}.").apply {
+        else "⟳ $waiting item${if (waiting == 1) "" else "s"} waiting to be sent to the supervisor. ${cloud.connectionLabel}.").apply {
             setTextColor(if (waiting == 0) Ui.green else Ui.amber)
         })
         if (waiting > 0) history.addView(Button(this).apply {
@@ -1042,7 +1039,6 @@ class MainActivity : Activity() {
     override fun onBackPressed() {
         when {
             selectedHistorySession != null -> showHistory()
-            onAccount -> showSettings()
             onSettings || onDetails || !onHome -> showHome()
             else -> super.onBackPressed()
         }
@@ -1057,7 +1053,7 @@ class MainActivity : Activity() {
         updateVisiblePage()
     }
 
-    /** Settings for every driver: alerts, break reminder, display, devices, setup guide, account, help, about. */
+    /** Settings always includes Account; extra options require developer mode. */
     private fun showSettings() {
         val keepY = if (onSettings) scroller.scrollY else 0 // a choice tapped in Settings keeps the place
         onHome = false
@@ -1065,6 +1061,10 @@ class MainActivity : Activity() {
         onAccount = false
         selectedHistorySession = null
         selectTab(false, settings = true)
+        if (!developerMode) {
+            addAccountCard()
+            return
+        }
         val prefs = edu.dlsu.esca_3_2526_c3.monitor.DeviceSettings(this)
 
         val alerts = Ui.card(this)
@@ -1103,13 +1103,7 @@ class MainActivity : Activity() {
         })
         page.addView(devicesCard, Ui.blockParams(this))
 
-        val accountCard = Ui.card(this)
-        accountCard.addView(Ui.title(this, "Account"))
-        accountCard.addView(Ui.linkRow(this, if (cloud.signedIn) cloud.email else "Not signed in",
-            if (cloud.signedIn) "Role: ${cloud.role.ifBlank { "none" }} · ${cloud.connectionLabel}" else "Sign in to send live status to the supervisor") {
-            showAccount()
-        })
-        page.addView(accountCard, Ui.blockParams(this))
+        addAccountCard()
 
         val help = Ui.card(this)
         help.addView(Ui.title(this, "What the screen means"))
@@ -1152,13 +1146,11 @@ class MainActivity : Activity() {
         if (keepY > 0) scroller.post { scroller.scrollTo(0, keepY) }
     }
 
-    /** Account: who is signed in, role, Firebase state, sign out. Sign-in itself is on the launcher screen. */
-    private fun showAccount() {
-        onHome = false
-        onAccount = true
-        selectTab(false, true)
+    /** Keep old account deep links pointing to the Settings tab. */
+    private fun showAccount() = showSettings()
 
-        page.addView(Ui.linkRow(this, "‹ Back to Settings", "") { showSettings() }, Ui.blockParams(this))
+    /** Account information and sign-in/sign-out controls shared by both Settings modes. */
+    private fun addAccountCard() {
         val account = Ui.card(this)
         account.addView(Ui.title(this, "Account"))
         if (cloud.signedIn) {
@@ -1188,6 +1180,5 @@ class MainActivity : Activity() {
             })
         }
         page.addView(account, Ui.blockParams(this))
-
     }
 }

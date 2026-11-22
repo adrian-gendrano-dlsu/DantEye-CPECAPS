@@ -42,12 +42,16 @@ class LauncherActivity : Activity() {
         else showLogin()
     }
 
-    private fun showMessage(message: String) {
+    private fun showMessage(message: String, canSetUpDriver: Boolean = false) {
         content.removeAllViews()
         addBrand()
         val card = Ui.card(this)
         card.addView(Ui.note(this, message))
         if (FirebaseApp.getApps(this).isNotEmpty()) {
+            if (canSetUpDriver) card.addView(button("Finish driver setup") {
+                val user = FirebaseAuth.getInstance().currentUser
+                if (user == null) showLogin() else createDriverRole(user.uid)
+            })
             card.addView(button("Check account role") { checkRole() })
             card.addView(button("Use another account") {
                 FirebaseAuth.getInstance().signOut()
@@ -55,6 +59,23 @@ class LauncherActivity : Activity() {
             })
         }
         content.addView(card, Ui.blockParams(this))
+    }
+
+    /** Complete the driver-only registration. The database rules prevent overwriting existing roles. */
+    private fun createDriverRole(uid: String) {
+        val auth = FirebaseAuth.getInstance()
+        if (auth.currentUser?.uid != uid) { showLogin(); return }
+        showMessage("Setting up driver access…")
+        FirebaseDatabase.getInstance(FIREBASE_DB_URL).getReference("roles").child(uid).setValue("driver")
+            .addOnCompleteListener(this) { result ->
+                if (isFinishing || isDestroyed || auth.currentUser?.uid != uid) return@addOnCompleteListener
+                if (result.isSuccessful) checkRole()
+                else showMessage(
+                    "The Firebase account exists, but driver setup failed. Check internet access and " +
+                            "deploy firebase/database.rules.json. ${result.exception?.localizedMessage ?: ""}",
+                    canSetUpDriver = true
+                )
+            }
     }
 
     /** App name and logo at the top of the sign-in screen. */
@@ -105,6 +126,8 @@ class LauncherActivity : Activity() {
 
         val card = Ui.card(this)
         card.addView(Ui.title(this, if (signingUp) "Create account" else "Sign in"))
+        if (signingUp) card.addView(Ui.note(this,
+            "New accounts are registered as drivers. A Firebase administrator assigns supervisor access."))
 
         val email = field("Email address")
         val password = field("Password", true)
@@ -128,11 +151,17 @@ class LauncherActivity : Activity() {
                 else -> {
                     feedback.text = "Checking account…"
                     val auth = FirebaseAuth.getInstance()
-                    val task = if (signingUp) auth.createUserWithEmailAndPassword(address, secret)
+                    val creatingAccount = signingUp
+                    val task = if (creatingAccount) auth.createUserWithEmailAndPassword(address, secret)
                     else auth.signInWithEmailAndPassword(address, secret)
                     task.addOnCompleteListener(this) { result ->
-                        if (result.isSuccessful) checkRole()
-                        else feedback.text = result.exception?.localizedMessage ?: "Sign-in failed."
+                        if (result.isSuccessful) {
+                            if (creatingAccount) {
+                                val uid = result.result?.user?.uid
+                                if (uid == null) showMessage("Account created, but no Firebase user was returned. Sign in again.")
+                                else createDriverRole(uid)
+                            } else checkRole()
+                        } else feedback.text = result.exception?.localizedMessage ?: "Sign-in failed."
                     }
                 }
             }
@@ -141,14 +170,6 @@ class LauncherActivity : Activity() {
         card.addView(button(if (signingUp) "Already have an account? Sign in" else "Create an account") {
             signingUp = !signingUp
             showLogin()
-        })
-        if (!signingUp) card.addView(button("Forgot password?") {
-            val address = email.text.toString().trim()
-            if (!android.util.Patterns.EMAIL_ADDRESS.matcher(address).matches()) {
-                feedback.text = "Enter your email first."
-            } else FirebaseAuth.getInstance().sendPasswordResetEmail(address)
-                .addOnSuccessListener { feedback.text = "Check your email for reset instructions." }
-                .addOnFailureListener { feedback.text = it.localizedMessage ?: "Could not send reset email." }
         })
         content.addView(card, Ui.blockParams(this))
     }
@@ -168,7 +189,11 @@ class LauncherActivity : Activity() {
                     "supervisor" -> SupervisorActivity::class.java
                     else -> null
                 }
-                if (destination == null) showMessage("This account has no assigned driver or supervisor role")
+                if (destination == null) showMessage(
+                    "This account has no assigned driver or supervisor role. You can finish setup as a driver, " +
+                            "or ask a Firebase administrator to assign the supervisor role.",
+                    canSetUpDriver = true
+                )
                 else {
                     startActivity(Intent(this, destination))
                     finish()

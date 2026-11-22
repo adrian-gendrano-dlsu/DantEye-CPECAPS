@@ -15,8 +15,10 @@ import com.google.firebase.messaging.FirebaseMessaging
 import org.json.JSONArray
 import org.json.JSONObject
 import java.text.DateFormat
+import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.TimeZone
 import java.util.UUID
 
 /** Firebase disallows periods and other punctuation in path keys; escape them reversibly. */
@@ -33,8 +35,8 @@ const val FIREBASE_DB_URL = "https://esca-3-2526-c3-testing-default-rtdb.asia-so
  *
  *   drivers/<driver>/name, email
  *   drivers/<driver>/live                 current status (every 2 s while monitoring)
- *   drivers/<driver>/sessions/<session>   start, end, duration, number of alerts, highest level
- *   alerts/<driver>/<alert>               behaviour, level (LOW / MEDIUM / HIGH), time, session, source, push
+ *   drivers/<driver>/sessions/<session>   start/end in milliseconds and readable Philippine time
+ *   alerts/<driver>/<alert>               behaviour, level, timestampMs, occurredAtPht, session, source, push
  *   roles/<uid>                           "driver" or "supervisor" (set in the Firebase console)
  *   supervisorTokens/<uid>                push-notification address of each supervisor phone
  *
@@ -145,14 +147,26 @@ class CloudSync(context: Context) {
 
     private fun level(severity: String) = when (Ui.riskLevel(severity)) { "HIGH" -> "HIGH"; "MEDIUM" -> "MEDIUM"; else -> "LOW" }
 
+    /** Use one explicit time zone so Firebase dates are understandable across phones. */
+    private fun formatPht(timestampMs: Long, pattern: String): String =
+        SimpleDateFormat(pattern, Locale.US).apply {
+            timeZone = TimeZone.getTimeZone("Asia/Manila")
+        }.format(Date(timestampMs))
+
+    private fun readableTime(timestampMs: Long) = formatPht(timestampMs, "yyyy-MM-dd hh:mm:ss a 'PHT'")
+
     /**
      * One alert. Real alerts: test = false, push = the alert state machine's push flag (once per HIGH
      * alert, at most one per minute). Developer-mode tests: test = true.
      */
     fun record(behavior: String, severity: String, sessionId: String, test: Boolean = true, push: Boolean = false) {
-        val id = UUID.randomUUID().toString()
+        val timestampMs = System.currentTimeMillis() // Event time, even if Firebase sync happens later.
+        val id = formatPht(timestampMs, "yyyy-MM-dd_HH-mm-ss_SSS") + "_PHT_" + UUID.randomUUID()
         enqueue(JSONObject().put("type", "alert").put("id", id).put("sessionId", sessionId).put("data", JSONObject()
-            .put("behavior", behavior).put("level", level(severity)).put("timestampMs", System.currentTimeMillis())
+            .put("behavior", behavior).put("level", level(severity)).put("timestampMs", timestampMs)
+            .put("occurredAtPht", readableTime(timestampMs))
+            .put("eventDatePht", formatPht(timestampMs, "yyyy-MM-dd"))
+            .put("eventTimePht", formatPht(timestampMs, "hh:mm:ss a"))
             .put("sessionId", sessionId).put("source", if (test) "test" else "device").put("push", push)))
     }
 
@@ -160,6 +174,8 @@ class CloudSync(context: Context) {
     fun recordSession(sessionId: String, fields: Map<String, Any?>) {
         val data = JSONObject()
         for ((k, v) in fields) data.put(k, v ?: JSONObject.NULL)
+        (fields["startedMs"] as? Number)?.toLong()?.let { data.put("startedAtPht", readableTime(it)) }
+        (fields["endedMs"] as? Number)?.toLong()?.let { data.put("endedAtPht", readableTime(it)) }
         enqueue(JSONObject().put("type", "session").put("id", UUID.randomUUID().toString())
             .put("sessionId", sessionId).put("data", data))
     }
@@ -171,6 +187,13 @@ class CloudSync(context: Context) {
     private fun updateLive(fields: Map<String, Any?>) {
         val changes = mutableMapOf<String, Any?>("name" to displayName(), "email" to email)
         for ((k, v) in fields) changes["live/$k"] = v
+        (fields["timestampMs"] as? Number)?.toLong()?.let {
+            changes["live/updatedAtPht"] = readableTime(it)
+        }
+        if ("locationTimestampMs" in fields) {
+            changes["live/locationUpdatedAtPht"] = (fields["locationTimestampMs"] as? Number)
+                ?.toLong()?.let { readableTime(it) }
+        }
         driverRef().updateChildren(changes)
     }
 
