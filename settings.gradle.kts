@@ -14,5 +14,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "DantEye-CPECAPS"
+rootProject.name = "Danteye"
 include(":app")

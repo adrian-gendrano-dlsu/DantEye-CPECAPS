@@ -1,0 +1,10 @@
+# Android Studio / Gradle outputs (never commit)
+.gradle/
+.kotlin/
+build/
+local.properties
+.idea/
+*.iml
+captures/
+.externalNativeBuild/
+.cxx/

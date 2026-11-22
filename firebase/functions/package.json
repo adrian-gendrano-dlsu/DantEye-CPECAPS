@@ -1,5 +1,5 @@
 {
-  "name": "esca_3_2526_c3-demo-firebase-functions",
+  "name": "danteye-firebase-functions",
   "private": true,
   "main": "index.js",
   "engines": { "node": "22" },
