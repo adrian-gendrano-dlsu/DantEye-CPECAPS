@@ -54,10 +54,16 @@ class SupervisorActivity : Activity() {
     private lateinit var cloud: CloudSync
     private var driversReference: DatabaseReference? = null
     private var driversListener: ValueEventListener? = null
+    private var demoDriversReference: DatabaseReference? = null
+    private var demoDriversListener: ValueEventListener? = null
+    private var rootDriverNodes = emptyList<DataSnapshot>()
+    private var demoDriverNodes = emptyList<DataSnapshot>()
     private var driverNodes = emptyList<DataSnapshot>()
     // alerts/<driver>: one listener per driver (newest 100), rows by driver id
     private val alertListeners = mutableMapOf<String, Pair<com.google.firebase.database.Query, ValueEventListener>>()
     private val alertRows = mutableMapOf<String, List<AlertRow>>()
+    private val demoAlertListeners = mutableMapOf<String, Pair<com.google.firebase.database.Query, ValueEventListener>>()
+    private val demoAlertRows = mutableMapOf<String, List<AlertRow>>()
     private var drivers = emptyList<Driver>()
     private var tab = "drivers"
     private var selectedId: String? = null
@@ -71,6 +77,12 @@ class SupervisorActivity : Activity() {
     private lateinit var settingsTab: TextView
     private var mapView: WebView? = null
     private var mapPosition: Pair<Double, Double>? = null
+    private var mapCard: LinearLayout? = null
+    private var mapDriverId: String? = null
+    private var mapLocationLabel: TextView? = null
+    private var mapCoordinatesLabel: TextView? = null
+    private var mapOpenButton: Button? = null
+    private var mapReady = false
     private val handler = Handler(Looper.getMainLooper())
     private val ageLabels = mutableMapOf<String, TextView>()
     private var shownStates = emptyMap<String, String>()
@@ -179,27 +191,52 @@ class SupervisorActivity : Activity() {
 
     // ------------------------------------------------------------------ Firebase
 
-    /** The roster comes from Firebase (never hard-coded drivers); alerts are read from the same snapshot. */
+    /** The roster comes from both Firebase driver paths. */
     private fun attachDrivers() {
         if (driversListener != null || cloud.role != "supervisor") return
         driversReference = cloud.driversRef()
         driversListener = object : ValueEventListener {
             override fun onDataChange(snapshot: DataSnapshot) {
-                driverNodes = snapshot.children.toList()
-                driverNodes.mapNotNull { it.key }.forEach { attachAlerts(it) }
-                drivers = driverNodes.mapNotNull { parseDriver(it) }
-                // Settings is not rebuilt by live data (only the Alerts count on the tab changes).
-                if (!isFinishing) { if (tab != "settings") render() else updateAlertsTab() }
+                rootDriverNodes = snapshot.children.toList()
+                rebuildDrivers()
             }
             override fun onCancelled(error: DatabaseError) {
                 cloud.toast("Driver list unavailable: ${error.message}")
             }
         }
         driversReference!!.addValueEventListener(driversListener!!)
+
+        demoDriversReference = cloud.demoDriversRef()
+        demoDriversListener = object : ValueEventListener {
+            override fun onDataChange(snapshot: DataSnapshot) {
+                demoDriverNodes = snapshot.children.toList()
+                rebuildDrivers()
+            }
+            override fun onCancelled(error: DatabaseError) {
+                cloud.toast("Demo driver list unavailable: ${error.message}")
+            }
+        }
+        demoDriversReference!!.addValueEventListener(demoDriversListener!!)
+
         if (Build.VERSION.SDK_INT >= 33 && pushEnabled() &&
             checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED)
             requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 77)
         if (pushEnabled()) cloud.registerSupervisorPush()
+    }
+
+    private fun rebuildDrivers() {
+        driverNodes = (rootDriverNodes + demoDriverNodes)
+            .groupBy { it.key }
+            .values.mapNotNull { nodes ->
+                nodes.maxByOrNull {
+                    it.child("live").child("timestampMs").getValue(Long::class.java) ?: 0L
+                }
+            }
+        driverNodes.mapNotNull { it.key }.forEach { attachAlerts(it) }
+        drivers = driverNodes.mapNotNull { parseDriver(it) }
+        if (!isFinishing) {
+            if (tab != "settings") render() else updateAlertsTab()
+        }
     }
 
     /** Newest 100 alerts of one driver; re-parses that driver's row when they change. */
@@ -222,13 +259,40 @@ class SupervisorActivity : Activity() {
         }
         query.addValueEventListener(listener)
         alertListeners[driverId] = query to listener
+
+        val demoQuery = cloud.demoEventsRef(driverId).orderByChild("timestampMs").limitToLast(100)
+        val demoListener = object : ValueEventListener {
+            override fun onDataChange(snapshot: DataSnapshot) {
+                demoAlertRows[driverId] = snapshot.children.mapNotNull { e ->
+                    val ms = e.child("timestampMs").getValue(Long::class.java) ?: return@mapNotNull null
+                    AlertRow(driverId, "", e.child("behavior").getValue(String::class.java) ?: "Alert", ms,
+                        e.child("severity").getValue(String::class.java) ?: "Warning",
+                        e.child("simulated").getValue(Boolean::class.java) == true ||
+                                e.child("source").getValue(String::class.java) == "test",
+                        e.child("sessionId").getValue(String::class.java) ?: "")
+                }
+                drivers = driverNodes.mapNotNull { parseDriver(it) }
+                if (!isFinishing) { if (tab != "settings") render() else updateAlertsTab() }
+            }
+            override fun onCancelled(error: DatabaseError) {
+                cloud.toast("Demo events unavailable: ${error.message}")
+            }
+        }
+        demoQuery.addValueEventListener(demoListener)
+        demoAlertListeners[driverId] = demoQuery to demoListener
     }
 
     private fun detachDrivers() {
         driversListener?.let { driversReference?.removeEventListener(it) }
+        demoDriversListener?.let { demoDriversReference?.removeEventListener(it) }
         driversReference = null; driversListener = null
+        demoDriversReference = null; demoDriversListener = null
         alertListeners.values.forEach { (q, l) -> q.removeEventListener(l) }
-        alertListeners.clear(); alertRows.clear(); driverNodes = emptyList()
+        demoAlertListeners.values.forEach { (q, l) -> q.removeEventListener(l) }
+        alertListeners.clear(); alertRows.clear()
+        demoAlertListeners.clear(); demoAlertRows.clear()
+        rootDriverNodes = emptyList(); demoDriverNodes = emptyList()
+        driverNodes = emptyList()
         drivers = emptyList()
     }
 
@@ -242,15 +306,21 @@ class SupervisorActivity : Activity() {
         val valid = lat != null && lng != null && lat.isFinite() && lng.isFinite() &&
                 lat in -90.0..90.0 && lng in -180.0..180.0 && !(lat == 0.0 && lng == 0.0)
         val name = node.child("name").getValue(String::class.java)?.takeIf { it.isNotBlank() }
-            ?: node.child("email").getValue(String::class.java) ?: id.replace("-", ".").replace("%2D", "-")
+            ?: node.child("email").getValue(String::class.java)
+            ?: live.child("name").getValue(String::class.java)
+            ?: live.child("email").getValue(String::class.java)
+            ?: id.replace("-", ".").replace("%2D", "-")
         // Alerts, oldest first; a MEDIUM test escalated to HIGH within 12 s shows once as HIGH.
         val rows = mutableListOf<AlertRow>()
-        (alertRows[id] ?: emptyList()).map { it.copy(driverName = name) }.sortedBy { it.ms }.forEach { row ->
-            val prior = rows.indexOfLast { it.session == row.session && row.session.isNotBlank() && it.name == row.name &&
-                    Ui.riskLevel(it.level) == "MEDIUM" && Ui.riskLevel(row.level) == "HIGH" && row.ms - it.ms in 0..12_000L }
-            if (prior >= 0) rows[prior] = rows[prior].copy(level = row.level) else rows.add(row)
-        }
-        val sessions = node.child("sessions").children.mapNotNull { sn ->
+        (alertRows[id].orEmpty() + demoAlertRows[id].orEmpty())
+            .distinctBy { Triple(it.ms, it.name, it.session) }
+            .map { it.copy(driverName = name) }.sortedBy { it.ms }.forEach { row ->
+                val prior = rows.indexOfLast { it.session == row.session && row.session.isNotBlank() && it.name == row.name &&
+                        Ui.riskLevel(it.level) == "MEDIUM" && Ui.riskLevel(row.level) == "HIGH" && row.ms - it.ms in 0..12_000L }
+                if (prior >= 0) rows[prior] = rows[prior].copy(level = row.level) else rows.add(row)
+            }
+        val sessionsNode = rootDriverNodes.firstOrNull { it.key == id } ?: node
+        val sessions = sessionsNode.child("sessions").children.mapNotNull { sn ->
             val started = sn.child("startedMs").getValue(Long::class.java) ?: return@mapNotNull null
             SessionRow(sn.key ?: "", started, sn.child("durationS").getValue(Long::class.java) ?: 0L,
                 sn.child("alerts").getValue(Long::class.java)?.toInt() ?: 0,
@@ -348,7 +418,36 @@ class SupervisorActivity : Activity() {
 
     private fun render(scrollTop: Boolean = false) {
         val scrollY = if (scrollTop) 0 else scroll.scrollY
-        content.removeAllViews()
+
+        val keepMap = tab == "drivers" &&
+                selectedId == mapDriverId &&
+                mapCard?.parent === content &&
+                drivers.any {
+                    it.id == selectedId && it.lat != null &&
+                            it.lng != null && it.locationTime > 0L
+                }
+
+        if (!keepMap) {
+            mapView?.let {
+                (it.parent as? ViewGroup)?.removeView(it)
+                it.destroy()
+            }
+            mapView = null
+            mapPosition = null
+            mapCard = null
+            mapDriverId = null
+            mapLocationLabel = null
+            mapCoordinatesLabel = null
+            mapOpenButton = null
+            mapReady = false
+        }
+
+        val retainedCard = if (keepMap) mapCard else null
+        for (i in content.childCount - 1 downTo 0) {
+            if (content.getChildAt(i) !== retainedCard) {
+                content.removeViewAt(i)
+            }
+        }
         ageLabels.clear()
         Ui.activeTab(driversTab, tab == "drivers")
         Ui.activeTab(alertsTab, tab == "alerts")
@@ -426,7 +525,17 @@ class SupervisorActivity : Activity() {
     }
 
     private fun showDriverDetails(id: String) {
-        content.addView(Ui.linkRow(this, "‹ All drivers", "") { selectedId = null; render(scrollTop = true) }, Ui.blockParams(this))
+        val retainedMap = mapCard?.takeIf {
+            it.parent === content && mapDriverId == id
+        }
+
+        fun addBeforeMap(view: android.view.View, params: LinearLayout.LayoutParams) {
+            val index = retainedMap?.let { content.indexOfChild(it) } ?: -1
+            if (index >= 0) content.addView(view, index, params)
+            else content.addView(view, params)
+        }
+
+        addBeforeMap(Ui.linkRow(this, "‹ All drivers", "") { selectedId = null; render(scrollTop = true) }, Ui.blockParams(this))
         val d = drivers.firstOrNull { it.id == id }
         if (d == null) {
             content.addView(Ui.note(this, "Waiting for this driver's first update."))
@@ -453,7 +562,7 @@ class SupervisorActivity : Activity() {
         status.addView(Ui.pair(this, "Driving time", "${d.tripSeconds / 60} min ${d.tripSeconds % 60} s"))
         status.addView(Ui.pair(this, "Speed", d.speedKph?.let { String.format(Locale.US, "%.0f km/h", it) } ?: "No GPS speed"))
         if (d.simulated) status.addView(Ui.note(this, "These values come from a developer-mode test, not from the camera."))
-        content.addView(status, Ui.blockParams(this))
+        addBeforeMap(status, Ui.blockParams(this))
 
         if (d.statuses.isNotEmpty()) {
             val behaviours = Ui.card(this)
@@ -461,45 +570,170 @@ class SupervisorActivity : Activity() {
             for ((behaviour, level) in d.statuses) {
                 behaviours.addView(Ui.alert(this, Ui.alertCause(behaviour), "", Ui.riskLevel(level), Ui.riskColor(level)))
             }
-            content.addView(behaviours, Ui.blockParams(this))
+            addBeforeMap(behaviours, Ui.blockParams(this))
         }
 
-        val location = Ui.card(this)
-        location.addView(Ui.title(this, "Location"))
+        val location = mapCard?.takeIf {
+            it.parent === content && mapDriverId == id
+        } ?: Ui.card(this)
+
         val lat = d.lat
         val lng = d.lng
+
         if (lat == null || lng == null || d.locationTime <= 0L) {
-            location.addView(Ui.note(this, "No location yet (the GPS on the sensor board has no fix)."))
+            location.addView(Ui.title(this, "Location"))
+            location.addView(Ui.note(this,
+                "No location yet (the GPS on the sensor board has no fix)."))
         } else {
             val age = (System.currentTimeMillis() - d.locationTime).coerceAtLeast(0L)
-            val label = if (d.locationSource == "manual") "manual test location" else "GPS position"
-            location.addView(Ui.note(this, if (age > 60_000L) "Last known $label · ${age / 60_000} min old" else "Latest $label"))
-            location.addView(Ui.pair(this, "Coordinates", String.format(Locale.US, "%.6f, %.6f", lat, lng)))
-            val bbox = String.format(Locale.US, "%.5f%%2C%.5f%%2C%.5f%%2C%.5f", lng - 0.006, lat - 0.004, lng + 0.006, lat + 0.004)
-            val marker = String.format(Locale.US, "%.6f%%2C%.6f", lat, lng)
-            val map = mapView ?: WebView(this).apply {
-                settings.javaScriptEnabled = true // required by OpenStreetMap's embedded map
-                webViewClient = WebViewClient()
-            }.also { mapView = it }
-            (map.parent as? ViewGroup)?.removeView(map)
-            val shown = mapPosition
-            // Reload the map only after ~30 m of movement (live data arrive every 2 s).
-            if (shown == null || kotlin.math.abs(shown.first - lat) > 0.0003 || kotlin.math.abs(shown.second - lng) > 0.0003) {
-                mapPosition = Pair(lat, lng)
-                map.loadUrl("https://www.openstreetmap.org/export/embed.html?bbox=$bbox&layer=mapnik&marker=$marker")
-            }
-            location.addView(map, LinearLayout.LayoutParams(-1, Ui.dp(this, 230)))
-            location.addView(Ui.note(this, "Map © OpenStreetMap"))
-            location.addView(Button(this).apply {
-                text = "Open in Maps"
-                isAllCaps = false
-                setOnClickListener {
-                    val uri = Uri.parse(String.format(Locale.US, "geo:%.6f,%.6f?q=%.6f,%.6f(%s)", lat, lng, lat, lng, Uri.encode(d.name)))
-                    try { startActivity(Intent(Intent.ACTION_VIEW, uri)) } catch (_: Exception) { cloud.toast("No maps app installed") }
+            val label = if (d.locationSource == "manual")
+                "manual test location" else "GPS position"
+            val locationText = if (age > 60_000L)
+                "Last known $label · ${age / 60_000} min old"
+            else "Latest $label"
+            val coordinatesText = String.format(
+                Locale.US, "%.6f, %.6f", lat, lng
+            )
+
+            if (location !== mapCard) {
+                location.addView(Ui.title(this, "Location"))
+
+                mapLocationLabel = Ui.note(this, locationText).also {
+                    location.addView(it)
                 }
-            })
+
+                val coordinatesRow = Ui.pair(
+                    this, "Coordinates", coordinatesText
+                )
+                mapCoordinatesLabel =
+                    coordinatesRow.getChildAt(1) as TextView
+                location.addView(coordinatesRow)
+
+                val map = WebView(this).apply {
+                    settings.javaScriptEnabled = true
+                    setBackgroundColor(
+                        android.graphics.Color.rgb(232, 235, 235)
+                    )
+                    webViewClient = object : WebViewClient() {
+                        override fun onPageFinished(
+                            view: WebView, url: String?
+                        ) {
+                            if (view !== mapView) return
+                            mapReady = true
+                            mapPosition?.let { p ->
+                                view.evaluateJavascript(
+                                    "window.moveDriver && window.moveDriver(${p.first},${p.second});",
+                                    null
+                                )
+                            }
+                        }
+                    }
+                }
+
+                mapView = map
+                mapPosition = Pair(lat, lng)
+                mapReady = false
+
+                location.addView(
+                    map,
+                    LinearLayout.LayoutParams(-1, Ui.dp(this, 230))
+                )
+
+                location.addView(Ui.note(this, "Map © OpenStreetMap"))
+
+                mapOpenButton = Button(this).apply {
+                    text = "Open in Maps"
+                    isAllCaps = false
+                }.also {
+                    location.addView(it)
+                }
+
+                mapCard = location
+                mapDriverId = id
+
+                val html = """
+                    <!DOCTYPE html>
+                    <html>
+                    <head>
+                        <meta name="viewport"
+                              content="width=device-width, initial-scale=1">
+                        <link rel="stylesheet"
+                              href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+                        <style>
+                            html, body, #map {
+                                width: 100%;
+                                height: 100%;
+                                margin: 0;
+                                padding: 0;
+                                background: #e8ebeb;
+                            }
+                        </style>
+                    </head>
+                    <body>
+                        <div id="map"></div>
+                        <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+                        <script>
+                            const map = L.map('map').setView([$lat, $lng], 15);
+
+                            L.tileLayer(
+                                'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+                                {
+                                    maxZoom: 19,
+                                    attribution:
+                                        '&copy; OpenStreetMap contributors'
+                                }
+                            ).addTo(map);
+
+                            const marker = L.marker([$lat, $lng]).addTo(map);
+
+                            window.moveDriver = function(lat, lng) {
+                                marker.setLatLng([lat, lng]);
+                                map.panTo([lat, lng], {
+                                    animate: false
+                                });
+                            };
+                        </script>
+                    </body>
+                    </html>
+                """.trimIndent()
+
+                map.loadDataWithBaseURL(
+                    "https://www.openstreetmap.org/",
+                    html, "text/html", "UTF-8", null
+                )
+            } else {
+                mapLocationLabel?.text = locationText
+                mapCoordinatesLabel?.text = coordinatesText
+
+                if (mapPosition != Pair(lat, lng)) {
+                    mapPosition = Pair(lat, lng)
+
+                    if (mapReady) {
+                        mapView?.evaluateJavascript(
+                            "window.moveDriver && window.moveDriver($lat,$lng);",
+                            null
+                        )
+                    }
+                }
+            }
+
+            mapOpenButton?.setOnClickListener {
+                val uri = Uri.parse(String.format(
+                    Locale.US,
+                    "geo:%.6f,%.6f?q=%.6f,%.6f(%s)",
+                    lat, lng, lat, lng, Uri.encode(d.name)
+                ))
+                try {
+                    startActivity(Intent(Intent.ACTION_VIEW, uri))
+                } catch (_: Exception) {
+                    cloud.toast("No maps app installed")
+                }
+            }
         }
-        content.addView(location, Ui.blockParams(this))
+
+        if (location.parent !== content) {
+            content.addView(location, Ui.blockParams(this))
+        }
 
         val sessionsCard = Ui.card(this)
         sessionsCard.addView(Ui.title(this, "Recent sessions"))
@@ -577,7 +811,7 @@ class SupervisorActivity : Activity() {
         val allowed = Build.VERSION.SDK_INT < 33 ||
                 checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
         if (!allowed) {
-            notifications.addView(Ui.note(this, "Android notifications are blocked for Danteye."))
+            notifications.addView(Ui.note(this, "Android notifications are blocked for ESCA-3-2526-C3."))
             notifications.addView(Button(this).apply {
                 text = "Allow notifications"
                 isAllCaps = false
@@ -616,7 +850,7 @@ class SupervisorActivity : Activity() {
         val about = Ui.card(this)
         about.addView(Ui.title(this, "About"))
         val version = try { packageManager.getPackageInfo(packageName, 0).versionName } catch (_: Exception) { "" }
-        about.addView(Ui.pair(this, "Danteye", "version $version"))
+        about.addView(Ui.pair(this, "ESCA-3-2526-C3", "version $version"))
         content.addView(about, Ui.blockParams(this))
     }
 }

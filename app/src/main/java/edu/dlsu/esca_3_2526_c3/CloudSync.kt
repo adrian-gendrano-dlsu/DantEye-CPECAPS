@@ -79,6 +79,10 @@ class CloudSync(context: Context) {
     fun driverRef(driverId: String = driverId()): DatabaseReference = driversRef().child(driverId)
     fun alertsRef(driverId: String = driverId()): DatabaseReference = db().getReference("alerts").child(driverId)
 
+    fun demoDriversRef(): DatabaseReference = db().getReference("demo/drivers")
+    fun demoEventsRef(driverId: String): DatabaseReference =
+        demoDriversRef().child(driverId).child("events")
+
     fun start() {
         if (!configured) { onChange?.invoke(); return }
         val auth = FirebaseAuth.getInstance()
