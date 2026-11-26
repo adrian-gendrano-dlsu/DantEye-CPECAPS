@@ -147,6 +147,24 @@ class DriverMonitoringService : Service(), TextToSpeech.OnInitListener, MonitorS
     private var wakeLock: PowerManager.WakeLock? = null
     private var wifiLock: WifiManager.WifiLock? = null
     private var lastPublishMs = 0L
+    private var lastPublishedManualLocation: Pair<Double, Double>? = null
+
+    private val manualLocationTick = object : Runnable {
+        override fun run() {
+            if (!active) return
+
+            if (cloud?.ready == true &&
+                manualLocation != lastPublishedManualLocation) {
+                val frame = latest?.takeIf {
+                    System.currentTimeMillis() - latestAtMs < 3_000L
+                }
+                publish(frame)
+            }
+
+            handler.postDelayed(this, 1_000L)
+        }
+    }
+
     private var lastTier = ""
     private var lastNotifiedTier = ""
     // Session summary for the supervisor (drivers/<driver>/sessions/<session>)
@@ -224,6 +242,8 @@ class DriverMonitoringService : Service(), TextToSpeech.OnInitListener, MonitorS
             if (monitor == null) startPipeline()
             handler.removeCallbacks(tick)
             handler.postDelayed(tick, 30_000L)
+            handler.removeCallbacks(manualLocationTick)
+            handler.post(manualLocationTick)
         }
         return START_STICKY
     }
@@ -240,6 +260,7 @@ class DriverMonitoringService : Service(), TextToSpeech.OnInitListener, MonitorS
         recent.clear()
         latest = null
         latestAtMs = 0L
+        lastPublishedManualLocation = null
         lastTier = ""
         lastNotifiedTier = ""
         getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
@@ -276,6 +297,7 @@ class DriverMonitoringService : Service(), TextToSpeech.OnInitListener, MonitorS
         val id = sessionId
         val trip = (System.currentTimeMillis() - sessionStarted).coerceAtLeast(0L) / 1000L
         handler.removeCallbacks(tick)
+        handler.removeCallbacks(manualLocationTick)
         resetHandler.removeCallbacksAndMessages(null)
         if (active) {
             SessionHistoryStore.stop(this, id)
@@ -392,11 +414,13 @@ class DriverMonitoringService : Service(), TextToSpeech.OnInitListener, MonitorS
 
     /** Send live status (measured values) to Firebase; f = null: no picture yet / camera lost. */
     private fun publish(f: LiveFrame?) {
-        lastPublishMs = System.currentTimeMillis()
         val c = cloud ?: return
+        if (!c.ready || c.role != "driver") return
+        lastPublishMs = System.currentTimeMillis()
         val trip = (lastPublishMs - sessionStarted).coerceAtLeast(0L) / 1000L
         val sensors = f?.out?.context
         val manual = manualLocation
+        lastPublishedManualLocation = manual
         val gps = sensors?.latitude != null && sensors.longitude != null
         val lat = if (gps) sensors?.latitude else manual?.first
         val lng = if (gps) sensors?.longitude else manual?.second
@@ -525,6 +549,7 @@ class DriverMonitoringService : Service(), TextToSpeech.OnInitListener, MonitorS
 
     override fun onDestroy() {
         handler.removeCallbacks(tick)
+        handler.removeCallbacks(manualLocationTick)
         monitor?.let { m -> Thread { try { synchronized(m) { m.stop() } } catch (_: Exception) {} }.start() }
         monitor = null
         releaseLocks()
