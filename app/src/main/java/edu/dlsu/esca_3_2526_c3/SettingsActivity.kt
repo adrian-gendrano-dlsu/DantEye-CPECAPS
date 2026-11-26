@@ -59,6 +59,7 @@ class SettingsActivity : Activity() {
     private lateinit var password: EditText
     private lateinit var cameraUrl: EditText
     private lateinit var sensorUrl: EditText
+    private lateinit var hardwareStatus: TextView   // CPECAPS: result of buzzer / camera changes
     private lateinit var pollMs: EditText
     private lateinit var readOnlyNote: TextView
     private lateinit var snapshot: ImageView
@@ -82,7 +83,7 @@ class SettingsActivity : Activity() {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(Ui.canvas)
         }
-        val header = Ui.header(this, "Device settings")
+        val header = Ui.header(this, sectionTitle())
         root.addView(header)
         val scroller = ScrollView(this).apply { isFillViewport = true }
         val body = LinearLayout(this).apply {
@@ -95,91 +96,60 @@ class SettingsActivity : Activity() {
         setContentView(root)
         Ui.fitSystemBars(this, root, header)
 
-        body.addView(Ui.linkRow(this, "‹ Back to Settings", "") { finish() })
+        body.addView(Ui.linkRow(this, "‹ Settings", "") { finish() })
         val developer = MainActivity.developerEnabled(this)
 
         // This note changes when monitoring starts or stops.
         readOnlyNote = Ui.note(this, "")
         body.addView(readOnlyNote)
 
-        // CONNECTION: URLs and hardware checks.
-        val endpoints = Ui.card(this)
-        endpoints.addView(Ui.title(this, "Camera and sensor board"))
-        endpoints.addView(Ui.note(this, "The phone must be on the DMS-NET Wi-Fi. Press \"Find the boards\" to fill in the addresses " +
-                "automatically, then test each part."))
-        endpoints.addView(Ui.note(this, "Camera address (DMS-NET: ${DeviceSettings.DEFAULT_CAMERA})"))
+        // Fields always exist (the tests and sends read the addresses); each screen shows only its own cards.
         cameraUrl = field("Camera base URL", settings.cameraUrl)
-        endpoints.addView(cameraUrl)
-
-        // Store a valid base URL as soon as it changes.
         autoSave(cameraUrl) { prefs.edit().putString("camera_url", normalizedBase(it)).apply() }
-
-        endpoints.addView(Ui.note(this, "Sensor board address: GPS, motion, buzzer (DMS-NET: ${DeviceSettings.DEFAULT_SENSOR}). Leave empty to drive without it"))
         sensorUrl = field("Sensor base URL", settings.sensorUrl)
-        endpoints.addView(sensorUrl)
-        autoSave(sensorUrl) {
-            prefs.edit().putString("sensor_url", normalizedBase(it, optional = true)).apply()
-        }
-
-        // Every test displays its result next to the action that ran it.
-        testAction(endpoints, "Find the boards on Wi-Fi") { discoverBoard(it) }
-        testAction(endpoints, "Test camera photo") { testSnapshot(it) }
-        testAction(endpoints, "Test camera video (5 s)") { testStream(it) }
-        testAction(endpoints, "Test sensors (GPS, MPU6050)") { testSensors(it) }
-        testAction(endpoints, "Test buzzer (HIGH 1.5 s)") { testBuzzer(it) }
-
-        // The photo area stays empty until a JPEG test succeeds.
+        autoSave(sensorUrl) { prefs.edit().putString("sensor_url", normalizedBase(it, optional = true)).apply() }
         snapshot = ImageView(this).apply {
             adjustViewBounds = true
             minimumHeight = Ui.dp(this@SettingsActivity, 90)
             contentDescription = "Last test image"
         }
-        endpoints.addView(snapshot, LinearLayout.LayoutParams(-1, -2))
-        endpoints.addView(action("Use the DMS-NET addresses") {
-            cameraUrl.setText(DeviceSettings.DEFAULT_CAMERA); sensorUrl.setText(DeviceSettings.DEFAULT_SENSOR)
-        })
-        body.addView(endpoints, Ui.blockParams(this))
-
-        // DMS-NET WI-FI PASSWORD: the sensor board creates DMS-NET, the camera joins it.
-        val wifiCard = Ui.card(this)
-        wifiCard.addView(Ui.title(this, "DMS-NET Wi-Fi password"))
-        wifiCard.addView(Ui.note(this, "Changes the password on the sensor board and the camera (both must be on). " +
-                "Afterwards every phone joins DMS-NET again with the new password."))
-        wifiCurrent = field("Current password", settings.dmsNetPassword).apply { inputType = PASSWORD_INPUT }
-        wifiNew = field("New password (8-63 characters)", "").apply { inputType = PASSWORD_INPUT }
-        wifiConfirm = field("New password again", "").apply { inputType = PASSWORD_INPUT }
-        wifiCard.addView(Ui.note(this, "Current password"))
-        wifiCard.addView(wifiCurrent)
-        wifiCard.addView(Ui.note(this, "New password"))
-        wifiCard.addView(wifiNew)
-        wifiCard.addView(wifiConfirm)
-        wifiCard.addView(option("Show passwords", false) { show ->
-            val type = if (show) InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD else PASSWORD_INPUT
-            for (f in listOf(wifiCurrent, wifiNew, wifiConfirm)) { f.inputType = type; f.setSelection(f.text.length) }
-        })
-        testAction(wifiCard, "Change the DMS-NET password") { changeDmsNetPassword(it) }
-        wifiHelp = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        wifiCard.addView(wifiHelp)
-        wifiCard.addView(Ui.note(this, "Forgot the password? Hold the BOOT button on the sensor board for 5 seconds " +
-                "(3 beeps): DMS-NET goes back to ${DeviceSettings.DMS_NET_PASSWORD}. The camera finds it again by itself."))
-        body.addView(wifiCard, Ui.blockParams(this))
-
-        // Research settings: developer mode only.
+        hardwareStatus = Ui.note(this, "")
         models = Ui.note(this, "")
         yoloEvery = field("YOLO every N frames", settings.yoloEvery.toString())
-        if (!developer) {
-            body.addView(Ui.note(this, "Alert and display options are on the Settings page."))
+
+        if (show("wifi")) addWifiCards(body)
+        if (show("camera")) addCameraCards(body)
+        if (show("sensor")) addSensorCards(body)
+        if (show("connection")) addConnectionCard(body)
+        if (!developer || !show("developer")) {
             applyReadOnlyState()
             return
         }
+        val simCard = Ui.card(this)
+        simCard.addView(Ui.title(this, "Map test (simulated drive)"))
+        simCard.addView(option("Simulated drive: replace the GPS with a made-up drive around DLSU (from the next monitoring start)",
+            settings.simulateGps) { settings.simulateGps = it })
+        simCard.addView(Ui.note(this, "For testing the maps indoors. Start monitoring with the camera on: the car moves on the driver's map " +
+                "and on the supervisor's live map once per second (up to 60 km/h, with one red-light stop). Turn it OFF before a real drive."))
+        body.addView(simCard, Ui.blockParams(this))
         val research = Ui.card(this)
-        research.addView(Ui.title(this, "Session logs · Developer"))
+        research.addView(Ui.title(this, "Session logs"))
         research.addView(option("Save a measurement log for each session (History > share)", settings.saveLogs) { settings.saveLogs = it })
+        research.addView(option("Detailed recording: also face points, blendshapes, every evidence source and YOLO box " +
+                "(frames_detail.jsonl, ~30 MB per 10 min; from the next session)", settings.detailedLog) { settings.detailedLog = it })
+        research.addView(Ui.note(this, "Each session folder: frames.jsonl (every picture: EAR per eye, MAR, head angles, blink, jaw, " +
+                "eye classifier, YOLO, evidence, behaviours, severity, fuzzy risk, alarm, speed, motion, GPS, timings), alerts.jsonl, " +
+                "summary.json, events.jsonl (app, camera, Wi-Fi, battery), sensors.jsonl (sensor board, phone GPS), and with detailed recording frames_detail.jsonl."))
+        research.addView(Button(this).apply {
+            text = "Export all session logs (.zip)"
+            isAllCaps = false
+            setOnClickListener { exportAllLogs() }
+        })
         body.addView(research, Ui.blockParams(this))
 
         // MODELS: built-in models, or files exported on the laptop.
         val modelCard = Ui.card(this)
-        modelCard.addView(Ui.title(this, "Models · Developer"))
+        modelCard.addView(Ui.title(this, "Models"))
         modelCard.addView(models)
         modelCard.addView(action("Import YOLO model (.tflite)") { pick(ModelFiles.YOLO) })
         modelCard.addView(action("Import YOLO class names (.txt, one per line)") { pick(ModelFiles.YOLO_LABELS) })
@@ -206,7 +176,7 @@ class SettingsActivity : Activity() {
 
         // ADVANCED: Wi-Fi provisioning and a future polling preference.
         val advanced = Ui.card(this)
-        advanced.addView(Ui.title(this, "Advanced · Developer"))
+        advanced.addView(Ui.title(this, "Advanced"))
         advanced.addView(Ui.note(this, "Camera Wi-Fi provisioning: only for camera firmware with /api/status and " +
                 "/api/config. The repository's firmware (07_esp32cam_prototype) does not have them, and the " +
                 "camera must stay on DMS-NET for the sensor board and the phone."))
@@ -246,6 +216,230 @@ class SettingsActivity : Activity() {
         applyReadOnlyState()
     }
 
+    /** Which screen this is: wifi, camera, sensor, connection, developer, or all (no extra). */
+    private val section by lazy { intent.getStringExtra("section") ?: "all" }
+    private fun show(name: String) = section == "all" || section == name
+
+    private fun sectionTitle() = when (section) {
+        "wifi" -> "Wi-Fi (DMS-NET)"
+        "camera" -> "Camera"
+        "sensor" -> "Sensor board & buzzer"
+        "connection" -> "Board addresses"
+        "developer" -> "Developer"
+        else -> "Device settings"
+    }
+
+    /** Wi-Fi screen: join DMS-NET, use mobile data too, change the DMS-NET password. */
+    private fun addWifiCards(body: LinearLayout) {
+        val join = Ui.card(this)
+        join.addView(Ui.title(this, "Join DMS-NET"))
+        join.addView(Ui.note(this, "The sensor board makes the Wi-Fi network DMS-NET (password ${settings.dmsNetPassword}). " +
+                "Join it on this phone. When Android says it has no internet, choose Stay connected."))
+        join.addView(Ui.linkRow(this, "Open Wi-Fi settings", "Join DMS-NET") {
+            startActivity(Intent(android.provider.Settings.ACTION_WIFI_SETTINGS))
+        })
+        body.addView(join, Ui.blockParams(this))
+
+        val data = Ui.card(this)
+        data.addView(Ui.title(this, "Wi-Fi and mobile data together"))
+        data.addView(Ui.note(this, "Danteye reaches the boards over DMS-NET and the supervisor over mobile data. " + BackgroundHelp.dataSteps()))
+        data.addView(Ui.linkRow(this, "Open data usage settings", "Allowed networks for apps") { BackgroundHelp.openDataUsage(this) })
+        body.addView(data, Ui.blockParams(this))
+
+        val wifiCard = Ui.card(this)
+        wifiCard.addView(Ui.title(this, "DMS-NET password"))
+        wifiCard.addView(Ui.note(this, "Changes it on the sensor board and the camera (both must be on). Then join DMS-NET again on every phone."))
+        wifiCurrent = field("Current password", settings.dmsNetPassword).apply { inputType = PASSWORD_INPUT }
+        wifiNew = field("New password (8-63 characters)", "").apply { inputType = PASSWORD_INPUT }
+        wifiConfirm = field("New password again", "").apply { inputType = PASSWORD_INPUT }
+        wifiCard.addView(Ui.note(this, "Current password"))
+        wifiCard.addView(wifiCurrent)
+        wifiCard.addView(Ui.note(this, "New password"))
+        wifiCard.addView(wifiNew)
+        wifiCard.addView(wifiConfirm)
+        wifiCard.addView(option("Show passwords", false) { show ->
+            val type = if (show) InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD else PASSWORD_INPUT
+            for (f in listOf(wifiCurrent, wifiNew, wifiConfirm)) { f.inputType = type; f.setSelection(f.text.length) }
+        })
+        testAction(wifiCard, "Change the password") { changeDmsNetPassword(it) }
+        wifiHelp = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        wifiCard.addView(wifiHelp)
+        wifiCard.addView(Ui.note(this, "Forgot it? Hold the BOOT button on the sensor board for 5 seconds (3 beeps): " +
+                "the password goes back to ${DeviceSettings.DMS_NET_PASSWORD}."))
+        body.addView(wifiCard, Ui.blockParams(this))
+    }
+
+    /** Camera screen: picture size, wide-lens view, zoom, SD video, tests. */
+    private fun addCameraCards(body: LinearLayout) {
+        val pic = Ui.card(this)
+        pic.addView(Ui.title(this, "Picture"))
+        pic.addView(Ui.choiceRow(this, "Resolution", listOf(
+            "QVGA" to "320×240", "HVGA" to "480×320", "VGA" to "640×480", "SVGA" to "800×600",
+            "XGA" to "1024×768", "HD" to "1280×720", "SXGA" to "1280×1024", "UXGA" to "1600×1200"), settings.cameraResolution) { r ->
+            settings.cameraResolution = r
+            if (DriverMonitoringService.active) hardwareStatus.text = "Saved. Stop monitoring, then pick it again to send it to the camera."
+            else sendToCamera("camera?res=$r", "Resolution $r")
+        })
+        pic.addView(Ui.note(this, "640×480 is recommended. Bigger sizes give a small or far face more detail but fewer pictures " +
+                "per second (check with the video test; keep it at 10 FPS or more). With the night-vision view crop, sizes above " +
+                "640×480 add little: the crop already uses about 680 sensor pixels across."))
+        pic.addView(Ui.choiceRow(this, "Camera lens", listOf("0" to "Normal", "120" to "Wide 120°", "160" to "Night vision 160°"),
+            settings.lensFov.toString()) { v ->
+            settings.lensFov = v.toInt()
+            sendCameraView()
+        })
+        pic.addView(Ui.choiceRow(this, "View to show", listOf("60" to "60°", "68" to "68°", "75" to "75°", "90" to "90°"),
+            settings.targetFov.toString()) { v ->
+            settings.targetFov = v.toInt()
+            sendCameraView()
+        })
+        pic.addView(Ui.note(this, "A wide lens shows only the middle of its picture, like a normal camera (68°). " +
+                "Changing these needs a new calibration (Settings > Calibration)."))
+        pic.addView(Ui.switchRow(this, "Zoom to the driver", "Frames the camera on your face when you calibrate", settings.autoZoom) {
+            settings.autoZoom = it
+        })
+        pic.addView(action("Reset the zoom") {
+            if (DriverMonitoringService.active) hardwareStatus.text = "Stop monitoring first."
+            else sendToCamera("camera?zoom=1&cx=0.5&cy=0.5", "Zoom reset")
+        })
+        pic.addView(action("Read the camera's current settings") { readHardwareSettings() })
+        if (hardwareStatus.parent == null) pic.addView(hardwareStatus)
+        body.addView(pic, Ui.blockParams(this))
+
+        // Picture tuning, e.g. for an IR light that is always on (night-vision module): kept on the camera.
+        val tune = Ui.card(this)
+        tune.addView(Ui.title(this, "Picture"))
+        tune.addView(Ui.note(this, "If the IR light makes the face look washed out or pink, use the night-vision preset, " +
+                "then check with the photo test below."))
+        tune.addView(action("Night-vision (IR) preset") {
+            settings.camGray = true; settings.camExposure = -1; settings.camContrast = 1; settings.camAec2 = true; settings.camLenc = true
+            sendToCamera("camera?gray=1&exposure=-1&contrast=1&aec2=1&lenc=1", "Night-vision preset")
+        })
+        tune.addView(action("Normal picture") {
+            settings.camGray = false; settings.camExposure = 0; settings.camContrast = 0; settings.camAec2 = false; settings.camLenc = false
+            sendToCamera("camera?gray=0&exposure=0&contrast=0&brightness=0&aec2=0&lenc=0", "Normal picture")
+        })
+        tune.addView(Ui.switchRow(this, "Black and white", "Removes the pink tint of IR light", settings.camGray) {
+            settings.camGray = it; sendToCamera("camera?gray=${if (it) 1 else 0}", "Black and white ${if (it) "on" else "off"}")
+        })
+        val levels = listOf("-2" to "−2", "-1" to "−1", "0" to "0", "1" to "+1", "2" to "+2")
+        tune.addView(Ui.choiceRow(this, "Exposure (lower = darker)", levels, settings.camExposure.toString()) { v ->
+            settings.camExposure = v.toInt(); sendToCamera("camera?exposure=$v", "Exposure $v")
+        })
+        tune.addView(Ui.choiceRow(this, "Contrast", levels, settings.camContrast.toString()) { v ->
+            settings.camContrast = v.toInt(); sendToCamera("camera?contrast=$v", "Contrast $v")
+        })
+        tune.addView(Ui.switchRow(this, "Strong-light exposure", "Helps when light shines straight on the face", settings.camAec2) {
+            settings.camAec2 = it; sendToCamera("camera?aec2=${if (it) 1 else 0}", "Strong-light exposure ${if (it) "on" else "off"}")
+        })
+        tune.addView(Ui.switchRow(this, "Lens correction", "Brightens the dark corners of wide lenses", settings.camLenc) {
+            settings.camLenc = it; sendToCamera("camera?lenc=${if (it) 1 else 0}", "Lens correction ${if (it) "on" else "off"}")
+        })
+        body.addView(tune, Ui.blockParams(this))
+
+        val rec = Ui.card(this)
+        rec.addView(Ui.title(this, "Video recording"))
+        rec.addView(Ui.switchRow(this, "Record to the camera's SD card", "While monitoring, a new file every 5 minutes", settings.recordSd) {
+            settings.recordSd = it
+        })
+        rec.addView(action("Check the SD card") { sendToCamera("record", "SD card") })
+        rec.addView(Ui.note(this, "The videos show the driver's face: keep the card private and never upload the files."))
+        body.addView(rec, Ui.blockParams(this))
+
+        val test = Ui.card(this)
+        test.addView(Ui.title(this, "Camera test"))
+        testAction(test, "Take a test photo") { testSnapshot(it) }
+        testAction(test, "Live video (start / stop)") { testStream(it) }
+        test.addView(snapshot, LinearLayout.LayoutParams(-1, -2))
+        test.addView(Ui.linkRow(this, "Camera position and calibration", "Aim the camera and save your calibration") {
+            if (DriverMonitoringService.active) android.widget.Toast.makeText(this, "Stop monitoring first", android.widget.Toast.LENGTH_SHORT).show()
+            else startActivity(Intent(this, SetupActivity::class.java).putExtra("step", 4))
+        })
+        body.addView(test, Ui.blockParams(this))
+    }
+
+    /** Sensor board screen: buzzer volume and type, GPS / motion sensor and buzzer tests. */
+    private fun addSensorCards(body: LinearLayout) {
+        val hw = Ui.card(this)
+        hw.addView(Ui.title(this, "Buzzer"))
+        // Volume works only with a passive buzzer: an active buzzer (or an active buzzer driver module) has its own
+        // oscillator and driver, so it always sounds at full loudness whatever the board sends.
+        val volumeRow = Ui.choiceRow(this, "Volume", (1..5).map { it.toString() to (if (it == 1) "1 quiet" else if (it == 5) "5 loud" else "$it") },
+            settings.buzzerVolume.toString()) { v ->
+            settings.buzzerVolume = v.toInt()
+            sendToSensor("buzzer?volume=$v&test=1", "Volume $v (one test beep)")
+        }
+        val activeNote = Ui.note(this, "Volume: an active buzzer always plays at full loudness, so the app cannot change it. " +
+            "To make it quieter, use a passive buzzer module (then choose Passive here) or ask for a resistor to be added in the buzzer wire.")
+        fun showVolume() {
+            val passive = settings.buzzerType == "passive"
+            volumeRow.visibility = if (passive) View.VISIBLE else View.GONE
+            activeNote.visibility = if (passive) View.GONE else View.VISIBLE
+        }
+        hw.addView(Ui.choiceRow(this, "Buzzer type", listOf("active" to "Active", "passive" to "Passive"), settings.buzzerType) { t ->
+            settings.buzzerType = t
+            showVolume()
+            sendToSensor("buzzer?type=$t&test=1", "Buzzer type: $t (one test beep)")
+        })
+        hw.addView(volumeRow)
+        hw.addView(activeNote)
+        showVolume()
+        hw.addView(Ui.note(this, "Not sure which type? An active buzzer beeps with power alone; a passive one needs the board to play a tone. Try both and keep the one that sounds clear."))
+        if (hardwareStatus.parent == null) hw.addView(hardwareStatus)
+        body.addView(hw, Ui.blockParams(this))
+
+        val test = Ui.card(this)
+        test.addView(Ui.title(this, "Sensor board test"))
+        testAction(test, "Test GPS and motion sensor") { testSensors(it) }
+        testAction(test, "Test the buzzer (1.5 s)") { testBuzzer(it) }
+        body.addView(test, Ui.blockParams(this))
+    }
+
+    /** Board addresses screen: where the camera and the sensor board are, and "find the boards". */
+    private fun addConnectionCard(body: LinearLayout) {
+        val endpoints = Ui.card(this)
+        endpoints.addView(Ui.title(this, "Board addresses"))
+        endpoints.addView(Ui.note(this, "On DMS-NET the addresses are fixed. Press Find the boards if a board does not answer."))
+        endpoints.addView(Ui.note(this, "Camera"))
+        endpoints.addView(cameraUrl)
+        endpoints.addView(Ui.note(this, "Sensor board (leave empty to drive without it)"))
+        endpoints.addView(sensorUrl)
+        testAction(endpoints, "Find the boards on Wi-Fi") { discoverBoard(it) }
+        endpoints.addView(action("Use the DMS-NET addresses") {
+            cameraUrl.setText(DeviceSettings.DEFAULT_CAMERA); sensorUrl.setText(DeviceSettings.DEFAULT_SENSOR)
+        })
+        body.addView(endpoints, Ui.blockParams(this))
+    }
+
+    /** Developer: every session folder in one .zip, shared with any app (email, Drive, USB transfer). */
+    private fun exportAllLogs() {
+        val root = getExternalFilesDir("sessions") ?: File(filesDir, "sessions")
+        val dirs = root.listFiles()?.filter { it.isDirectory }?.sortedBy { it.name } ?: emptyList()
+        if (dirs.isEmpty()) { android.widget.Toast.makeText(this, "No session logs yet.", android.widget.Toast.LENGTH_SHORT).show(); return }
+        android.widget.Toast.makeText(this, "Packing ${dirs.size} sessions…", android.widget.Toast.LENGTH_SHORT).show()
+        Thread {
+            try {
+                val stamp = java.text.SimpleDateFormat("yyyyMMdd_HHmm", java.util.Locale.US).format(java.util.Date())
+                val zip = File(cacheDir, "danteye_logs_$stamp.zip")
+                java.util.zip.ZipOutputStream(zip.outputStream().buffered()).use { zos ->
+                    for (dir in dirs) dir.listFiles()?.forEach { f ->
+                        zos.putNextEntry(java.util.zip.ZipEntry(dir.name + "/" + f.name))
+                        f.inputStream().use { it.copyTo(zos) }
+                        zos.closeEntry()
+                    }
+                }
+                val uri = androidx.core.content.FileProvider.getUriForFile(this, "$packageName.files", zip)
+                runOnUiThread {
+                    startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).setType("application/zip")
+                        .putExtra(Intent.EXTRA_STREAM, uri).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION),
+                        "Export session logs (${zip.length() / 1048576} MB)"))
+                }
+            } catch (e: Exception) {
+                runOnUiThread { android.widget.Toast.makeText(this, "Export failed: ${e.message}", android.widget.Toast.LENGTH_LONG).show() }
+            }
+        }.start()
+    }
+
     /** Recheck access and monitoring state whenever Settings returns to the foreground. */
     override fun onResume() {
         super.onResume()
@@ -257,7 +451,7 @@ class SettingsActivity : Activity() {
         val monitoring = DriverMonitoringService.active
         controls.forEach { it.isEnabled = !monitoring }
         readOnlyNote.text = if (monitoring)
-            "Monitoring is running: stop it to change these settings or run tests."
+            "Stop monitoring to change these settings or run tests."
         else ""
     }
 
@@ -592,6 +786,68 @@ class SettingsActivity : Activity() {
         }
     }
 
+    /** CPECAPS: GET <sensor>/<path> (firmware 06 /buzzer) and report the answer under the Buzzer and camera card. */
+    private fun sendToSensor(path: String, label: String) = sendTo(sensorUrl.text.toString(), path, label, "sensor board")
+
+    /** CPECAPS: GET <camera>/<path> (firmware 07 /camera). */
+    private fun sendToCamera(path: String, label: String) = sendTo(cameraUrl.text.toString(), path, label, "camera")
+
+    private fun sendTo(baseText: String, path: String, label: String, board: String) {
+        val base = try { normalizedBase(baseText, optional = true) } catch (e: Exception) { "" }
+        if (base.isEmpty()) { hardwareStatus.text = "Saved on the phone. Enter the $board address (or Find the boards) to send it."; return }
+        hardwareStatus.text = "$label: sending to the $board …"
+        Thread {
+            val msg = try {
+                val reply = requestText("$base/$path")
+                "$label: done. The $board answered $reply"
+            } catch (e: Exception) {
+                "$label: saved on the phone, but the $board did not answer (${e.message}). " +
+                        "Is it on, on DMS-NET, and running the CPECAPS firmware?"
+            }
+            runOnUiThread { hardwareStatus.text = msg }
+        }.start()
+    }
+
+    /** CPECAPS: lens angle + wanted view to the camera (firmware 07 /camera?lens=&fov=). */
+    private fun sendCameraView() {
+        if (DriverMonitoringService.active) { hardwareStatus.text = "Saved. It is sent to the camera when the next trip starts."; return }
+        sendToCamera("camera?lens=${settings.lensFov}&fov=${settings.targetFov}",
+            if (settings.lensFov > 0) "View ${settings.targetFov}° from the ${settings.lensFov}° lens" else "Normal lens (no crop)")
+    }
+
+    /** CPECAPS: show what the boards currently use (and keep the phone's copy in step). */
+    private fun readHardwareSettings() {
+        val sensor = try { normalizedBase(sensorUrl.text.toString(), optional = true) } catch (_: Exception) { "" }
+        val camera = try { normalizedBase(cameraUrl.text.toString(), optional = true) } catch (_: Exception) { "" }
+        hardwareStatus.text = "Reading the boards …"
+        Thread {
+            val lines = mutableListOf<String>()
+            if (sensor.isNotEmpty()) try {
+                val j = JSONObject(requestText("$sensor/buzzer"))
+                settings.buzzerVolume = j.optInt("volume", settings.buzzerVolume)
+                settings.buzzerType = j.optString("type", settings.buzzerType)
+                lines += "Buzzer: volume ${j.optInt("volume")}, ${j.optString("type")}"
+            } catch (e: Exception) { lines += "Buzzer: no answer (${e.message})" }
+            if (camera.isNotEmpty()) try {
+                val j = JSONObject(requestText("$camera/camera"))
+                settings.cameraResolution = j.optString("res", settings.cameraResolution)
+                if (j.has("lens")) { settings.lensFov = j.optInt("lens", settings.lensFov); settings.targetFov = j.optInt("fov", settings.targetFov) }
+                if (j.has("gray")) {
+                    settings.camGray = j.optInt("gray") != 0; settings.camExposure = j.optInt("exposure"); settings.camContrast = j.optInt("contrast")
+                    settings.camAec2 = j.optInt("aec2") != 0; settings.camLenc = j.optInt("lenc") != 0
+                }
+                lines += "Camera: " + edu.dlsu.esca_3_2526_c3.monitor.CameraControl.describe(j)
+                try {
+                    lines += edu.dlsu.esca_3_2526_c3.monitor.CameraControl.describeRecord(JSONObject(requestText("$camera/record")))
+                } catch (_: Exception) { lines += "SD card: this camera firmware cannot record (upload the CPECAPS firmware 07)" }
+            } catch (e: Exception) { lines += "Camera: no answer (${e.message})" }
+            runOnUiThread {
+                hardwareStatus.text = if (lines.isEmpty()) "Enter the board addresses first." else lines.joinToString("\n") +
+                        "\nReopen this page to see the choices updated."
+            }
+        }.start()
+    }
+
     /** Sound the buzzer HIGH for 1.5 s, then off (firmware 06: /tier?level=0..3). */
     private fun testBuzzer(result: TestViews) {
         val base = try { normalizedBase(sensorUrl.text.toString(), optional = true) }
@@ -606,35 +862,59 @@ class SettingsActivity : Activity() {
     }
 
     /** Read the video stream for 5 s: frames per second and picture size (what monitoring receives). */
+    /** Live video test: plays until pressed again (or the screen closes) and shows OK / FPS / resolution. */
+    @Volatile private var videoRunning = false
+
     private fun testStream(result: TestViews) {
+        if (videoRunning) { videoRunning = false; return } // second press: stop
         val base = try { normalizedBase(cameraUrl.text.toString()) }
         catch (e: Exception) { show(result, "Invalid camera URL. ${e.message}", false); return }
         val url = URL(base)
         val stream = "${url.protocol}://${url.host}:81/stream"
-        onWorker(result, "Reading $stream") {
+        videoRunning = true
+        onWorker(result, "Connecting to the video") {
             val c = connect(stream)
             try {
                 c.readTimeout = 5000
                 require(c.responseCode == 200) { "HTTP ${c.responseCode}. Close any browser tab showing the stream." }
                 val reader = MjpegReader(c.inputStream)
-                val started = System.nanoTime()
-                var frames = 0
-                var size = ""
-                while (System.nanoTime() - started < 5_000_000_000L) {
+                var windowStart = System.nanoTime()
+                var windowFrames = 0
+                var lastShown = 0L
+                val options = BitmapFactory.Options().apply { inPreferredConfig = android.graphics.Bitmap.Config.RGB_565 }
+                while (videoRunning && !isFinishing) {
                     val jpeg = reader.next()
-                    if (frames == 0) {
-                        val o = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-                        BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size, o)
-                        size = "${o.outWidth} × ${o.outHeight}"
+                    windowFrames++
+                    val now = System.nanoTime()
+                    if (now - lastShown > 100_000_000L) { // show about 10 pictures per second
+                        lastShown = now
+                        val bmp = BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size, options)
+                        if (bmp != null) runOnUiThread { if (videoRunning) snapshot.setImageBitmap(bmp) }
+                        if (now - windowStart >= 1_000_000_000L && bmp != null) {
+                            val fps = windowFrames / ((now - windowStart) / 1e9)
+                            val w = bmp.width; val h = bmp.height; val kb = jpeg.size / 1024
+                            windowStart = now
+                            windowFrames = 0
+                            val verdict = when { fps >= 10 -> "Video OK"; fps >= 5 -> "Video slow"; else -> "Video too slow" }
+                            runOnUiThread {
+                                if (videoRunning) show(result, String.format(java.util.Locale.US,
+                                    "%s: %.1f pictures per second · %d × %d · %d KB per picture. Press again to stop.", verdict, fps, w, h, kb),
+                                    if (fps >= 5) true else false)
+                            }
+                        }
                     }
-                    frames++
                 }
-                val fps = frames / ((System.nanoTime() - started) / 1e9)
-                runOnUiThread {
-                    show(result, String.format(java.util.Locale.US, "Video OK: %.1f frames per second, %s.", fps, size), fps >= 5)
-                }
-            } finally { c.disconnect() }
+                runOnUiThread { show(result, "Video stopped.", null); result.indicator.text = "○ Stopped" }
+            } finally {
+                videoRunning = false
+                c.disconnect()
+            }
         }
+    }
+
+    override fun onPause() {
+        videoRunning = false // the camera serves one viewer at a time: free it when leaving the screen
+        super.onPause()
     }
 
     private fun option(label: String, checked: Boolean, save: (Boolean) -> Unit) = CheckBox(this).apply {

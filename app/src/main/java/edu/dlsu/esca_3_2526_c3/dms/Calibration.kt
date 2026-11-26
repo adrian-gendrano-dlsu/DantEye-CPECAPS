@@ -216,6 +216,23 @@ class DriverCalibrator(private val cfg: CalibrationConfig, private val thrCfg: T
         samples = mutableListOf()
     }
 
+    /** Use a baseline saved from an earlier calibration (same driver, same camera mount): no waiting (dms restore()). */
+    fun restore(saved: Baseline) {
+        baseline = saved.copy()
+        anchor = saved.copy()
+        status = CALIBRATED
+        lastFailure = ""
+        windowStart = null
+        samples = mutableListOf()
+        lastAdaptT = null
+        val offset = hypot(saved.yaw, saved.pitch)
+        warning = if (offset > cfg.maxCameraOffsetDeg)
+            "camera is %.0f deg off the driver's face axis (limit %.0f): eye/mouth measurements are unreliable - mount the camera in front of the driver"
+                .format(offset, cfg.maxCameraOffsetDeg)
+        else ""
+        thresholds = Thresholds.fromBaseline(baseline, thrCfg, calibrated = true)
+    }
+
     fun progress(t: Double): Double {
         val ws = windowStart
         if (status != CALIBRATING || ws == null) return if (status == CALIBRATED) 1.0 else 0.0

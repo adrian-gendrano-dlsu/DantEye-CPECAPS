@@ -89,6 +89,7 @@ class SessionLog(val dir: File, private val meta: JSONObject = JSONObject()) {
             .put("calibration", out.calibrationStatus)
             .put("timings_ms", JSONObject(timingsMs.mapValues { Num.pyRound(it.value, 2) }))
         frames.write(rec.toString()); frames.newLine()
+        if (n % 30 == 0) frames.flush() // CPECAPS: a killed app keeps all but the last second
         logAlerts(out.alerts)
     }
 

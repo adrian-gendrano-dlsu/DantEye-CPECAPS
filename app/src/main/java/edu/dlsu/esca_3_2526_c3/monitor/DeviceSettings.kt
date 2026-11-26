@@ -25,9 +25,57 @@ class DeviceSettings(context: Context) {
     var pollMs: Int
         get() = prefs.getInt("poll_ms", 1000)
         set(v) = prefs.edit().putInt("poll_ms", v).apply()
-    var phoneSound: Boolean
-        get() = prefs.getBoolean("phone_sound", false)
-        set(v) = prefs.edit().putBoolean("phone_sound", v).apply()
+    // CPECAPS: no phone beeps (the sensor board's buzzer sounds the alarm). Buzzer and camera settings
+    // are kept here so the app shows the last value even when the boards are off.
+    var buzzerVolume: Int
+        get() = prefs.getInt("buzzer_volume", 5)
+        set(v) = prefs.edit().putInt("buzzer_volume", v.coerceIn(1, 5)).apply()
+    var buzzerType: String
+        get() = prefs.getString("buzzer_type", "active") ?: "active"
+        set(v) = prefs.edit().putString("buzzer_type", v).apply()
+    var cameraResolution: String
+        get() = prefs.getString("camera_res", "VGA") ?: "VGA"
+        set(v) = prefs.edit().putString("camera_res", v).apply()
+    /** CPECAPS: lens angle of the camera module in degrees (0 = normal lens: no crop; 160 = night-vision wide lens). */
+    var lensFov: Int
+        get() = prefs.getInt("lens_fov", 0)
+        set(v) = prefs.edit().putInt("lens_fov", v).apply()
+    /** CPECAPS: the view to show with a wide lens, in degrees (the normal OV2640 / OV3660 lens: about 66-71). */
+    var targetFov: Int
+        get() = prefs.getInt("target_fov", 68)
+        set(v) = prefs.edit().putInt("target_fov", v.coerceIn(20, 180)).apply()
+    /** CPECAPS: picture tuning kept on the camera (firmware 07 /camera?gray=&exposure=&contrast=&aec2=&lenc=). */
+    var camGray: Boolean
+        get() = prefs.getBoolean("cam_gray", false)
+        set(v) = prefs.edit().putBoolean("cam_gray", v).apply()
+    var camExposure: Int
+        get() = prefs.getInt("cam_exposure", 0)
+        set(v) = prefs.edit().putInt("cam_exposure", v.coerceIn(-2, 2)).apply()
+    var camContrast: Int
+        get() = prefs.getInt("cam_contrast", 0)
+        set(v) = prefs.edit().putInt("cam_contrast", v.coerceIn(-2, 2)).apply()
+    var camAec2: Boolean
+        get() = prefs.getBoolean("cam_aec2", false)
+        set(v) = prefs.edit().putBoolean("cam_aec2", v).apply()
+    var camLenc: Boolean
+        get() = prefs.getBoolean("cam_lenc", false)
+        set(v) = prefs.edit().putBoolean("cam_lenc", v).apply()
+    /** CPECAPS: zoom the camera to the driver's face at the start of each trip. */
+    var autoZoom: Boolean
+        get() = prefs.getBoolean("auto_zoom", true)
+        set(v) = prefs.edit().putBoolean("auto_zoom", v).apply()
+    /** CPECAPS: record the camera video to its microSD card while monitoring. */
+    var recordSd: Boolean
+        get() = prefs.getBoolean("record_sd", true)
+        set(v) = prefs.edit().putBoolean("record_sd", v).apply()
+    /** Developer mode: also write frames_detail.jsonl (landmarks, blendshapes, every evidence source, YOLO boxes). */
+    var detailedLog: Boolean
+        get() = prefs.getBoolean("detailed_log", false)
+        set(v) = prefs.edit().putBoolean("detailed_log", v).apply()
+    /** CPECAPS developer test: feed a made-up drive (SimulatedGps) instead of waiting for a real GPS fix. */
+    var simulateGps: Boolean
+        get() = prefs.getBoolean("simulate_gps", false)
+        set(v) = prefs.edit().putBoolean("simulate_gps", v).apply()
     var saveLogs: Boolean
         get() = prefs.getBoolean("save_logs", true)
         set(v) = prefs.edit().putBoolean("save_logs", v).apply()

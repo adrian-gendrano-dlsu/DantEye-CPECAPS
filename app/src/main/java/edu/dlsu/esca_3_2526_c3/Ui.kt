@@ -105,18 +105,33 @@ object Ui {
         orientation = LinearLayout.VERTICAL
         setPadding(0, dp(c, 8), 0, dp(c, 8))
         addView(text(c, label, 15f, navy, true))
-        val row = LinearLayout(c).apply { orientation = LinearLayout.HORIZONTAL }
+        var row = LinearLayout(c).apply { orientation = LinearLayout.HORIZONTAL }
+        val chips = mutableListOf<Pair<String, TextView>>()
+        val perRow = if (options.size > 5) 4 else options.size // long lists wrap onto more rows
+        fun style(chip: TextView, name: String, on: Boolean) {
+            chip.text = if (on) "✓ $name" else name
+            chip.setTextColor(if (on) white else navy)
+            chip.setTypeface(null, if (on) android.graphics.Typeface.BOLD else android.graphics.Typeface.NORMAL)
+            chip.background = shape(if (on) blue else if (nightMode) Color.rgb(44, 55, 72) else Color.rgb(232, 239, 248), c, 10)
+            chip.contentDescription = "$label: $name" + if (on) ", selected" else ""
+        }
         for ((value, name) in options) {
-            val on = value == selected
-            row.addView(text(c, if (on) "✓ $name" else name, 13f, if (on) white else navy, on).apply {
+            val chip = text(c, name, 13f, navy, false).apply {
                 gravity = Gravity.CENTER
                 setPadding(dp(c, 6), dp(c, 10), dp(c, 6), dp(c, 10))
-                background = shape(if (on) blue else if (nightMode) Color.rgb(44, 55, 72) else Color.rgb(232, 239, 248), c, 10)
-                contentDescription = "$label: $name" + if (on) ", selected" else ""
                 isClickable = true
-                setOnClickListener { onPick(value) }
-            }, LinearLayout.LayoutParams(0, -2, 1f).apply { setMargins(dp(c, 2), dp(c, 6), dp(c, 2), 0) })
+            }
+            style(chip, name, value == selected)
+            chips += value to chip
+            // CPECAPS: the tapped choice is highlighted at once (no page rebuild needed).
+            chip.setOnClickListener {
+                for ((v, ch) in chips) style(ch, options.first { it.first == v }.second, v == value)
+                onPick(value)
+            }
+            if (row.childCount == perRow) { addView(row); row = LinearLayout(c).apply { orientation = LinearLayout.HORIZONTAL } }
+            row.addView(chip, LinearLayout.LayoutParams(0, -2, 1f).apply { setMargins(dp(c, 2), dp(c, 6), dp(c, 2), 0) })
         }
+        while (row.childCount in 1 until perRow) row.addView(android.view.View(c), LinearLayout.LayoutParams(0, 1, 1f)) // same chip widths
         addView(row)
     }
 

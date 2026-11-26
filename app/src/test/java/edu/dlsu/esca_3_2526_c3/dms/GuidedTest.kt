@@ -8,7 +8,8 @@ import org.junit.Test
 
 /** Guided recording: schedule, spoken cues and the label file (read by Python too: tests/test_guided_labels.py). */
 class GuidedTest {
-    private fun resource(name: String) = javaClass.getResource("/golden/$name")!!.readText()
+    // Git on Windows may check the file out with CRLF line endings; the app writes LF.
+    private fun resource(name: String) = javaClass.getResource("/golden/$name")!!.readText().replace("\r\n", "\n")
 
     @Test
     fun labelFilesMatchTheSharedReference() {

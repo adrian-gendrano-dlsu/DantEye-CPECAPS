@@ -19,10 +19,12 @@ class WifiNet(context: Context) {
     private val cm = context.getSystemService(ConnectivityManager::class.java)
     @Volatile var network: Network? = null
         private set
+    /** CPECAPS: called with "available" / "lost" when the DMS-NET Wi-Fi comes and goes (events.jsonl). */
+    @Volatile var onChange: ((String) -> Unit)? = null
 
     private val callback = object : ConnectivityManager.NetworkCallback() {
-        override fun onAvailable(n: Network) { network = n }
-        override fun onLost(n: Network) { if (network == n) network = null }
+        override fun onAvailable(n: Network) { network = n; onChange?.invoke("available") }
+        override fun onLost(n: Network) { if (network == n) network = null; onChange?.invoke("lost") }
     }
 
     fun start() {

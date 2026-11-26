@@ -10,8 +10,8 @@ android {
         applicationId = "edu.dlsu.esca_3_2526_c3"
         minSdk = 24
         targetSdk = 35
-        versionCode = 3
-        versionName = "3.0-v2-dms"
+        versionCode = 4
+        versionName = "CPECAPS 2.0 (new database)"
     }
 
     compileOptions {

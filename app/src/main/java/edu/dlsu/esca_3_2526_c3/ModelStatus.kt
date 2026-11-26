@@ -26,7 +26,7 @@ object ModelStatus {
             "YOLO ($yolo): " + if (yolo == "off") "phone detection off" else yoloRoles.sorted().joinToString(", ").replace('_', ' '),
             "Eye-state classifier: ${src(context, ModelFiles.EYE)}",
             "Fusion model: ${src(context, ModelFiles.FUSION)}",
-            "Fuzzy risk model: 81 rules · settings ${if (src(context, ModelFiles.CONFIG) == "off") "defaults" else src(context, ModelFiles.CONFIG)}",
+            "Fuzzy risk model: 93 rules (high speed raises the risk) · settings ${if (src(context, ModelFiles.CONFIG) == "off") "defaults" else src(context, ModelFiles.CONFIG)}",
         ).joinToString("\n")
     }
 
@@ -64,7 +64,7 @@ object ModelStatus {
             appendLine(String.format(Locale.US, "• Calibration: %.0f s, camera within %.0f°", cfg.calibration.durationS, cfg.calibration.maxCameraOffsetDeg))
             appendLine()
             appendLine("STAGE 4-5 · SEVERITY AND FUZZY RISK")
-            appendLine(String.format(Locale.US, "• 81 fuzzy rules (fatigue 27, distraction 9, context 9, risk 36); tiers LOW %.1f, MEDIUM %.1f, HIGH %.1f; hysteresis %.0f",
+            appendLine(String.format(Locale.US, "• 93 fuzzy rules (fatigue 27, distraction 9, context 9, risk 48; high speed counts one level higher); tiers LOW %.1f, MEDIUM %.1f, HIGH %.1f; hysteresis %.0f",
                 cfg.risk.tierBounds[0], cfg.risk.tierBounds[1], cfg.risk.tierBounds[2], cfg.risk.tierHysteresis))
             appendLine("• Settings: ${if (src(context, ModelFiles.CONFIG) == "off") "defaults" else "${src(context, ModelFiles.CONFIG)} dms_config.json"}")
             append("Built-in files are in the app (assets); imported files replace them until removed.")

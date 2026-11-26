@@ -15,10 +15,8 @@ import com.google.firebase.messaging.FirebaseMessaging
 import org.json.JSONArray
 import org.json.JSONObject
 import java.text.DateFormat
-import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
-import java.util.TimeZone
 import java.util.UUID
 
 /** Firebase disallows periods and other punctuation in path keys; escape them reversibly. */
@@ -31,18 +29,20 @@ fun firebaseEmailKey(email: String): String = email.trim().lowercase(Locale.ROOT
 const val FIREBASE_DB_URL = "https://esca-3-2526-c3-testing-default-rtdb.asia-southeast1.firebasedatabase.app"
 
 /**
- * Firebase for the driver, the supervisor and the monitoring service. Database layout:
+ * Firebase for the driver, the supervisor and the monitoring service. Database layout (firebase/DATABASE.md):
  *
- *   drivers/<driver>/name, email
- *   drivers/<driver>/live                 current status (every 2 s while monitoring)
- *   drivers/<driver>/sessions/<session>   start/end in milliseconds and readable Philippine time
- *   alerts/<driver>/<alert>               behaviour, level, timestampMs, occurredAtPht, session, source, push
- *   roles/<uid>                           "driver" or "supervisor" (set in the Firebase console)
- *   supervisorTokens/<uid>                push-notification address of each supervisor phone
+ *   accounts/<uid>                        email, name, role (driver / supervisor, set by a supervisor), requestedRole,
+ *                                         requestedAt, lastSignIn (readable times) + ...Ms copies
+ *   drivers/<uid>/name, email
+ *   drivers/<uid>/live                    status right now (every 2 s while monitoring); updated = readable time
+ *   drivers/<uid>/trips/<start time>      e.g. 2026-11-27_17-30-05: started, ended, minutes, alerts, highAlerts, maxLevel
+ *   drivers/<uid>/alerts/<time_behaviour> e.g. 2026-11-27_17-42-10-123_eye-closure: time, trip, behaviour, level,
+ *                                         sentToSupervisor, test, timestampMs (for sorting)
+ *   supervisorPhones/<uid>                push-notification address of each supervisor phone
+ *   setup/firstSupervisor                 who claimed the first supervisor role (written once)
  *
- * <driver> = the account's email with "." -> "-" (firebaseEmailKey). Alerts and session summaries
- * wait on the phone while offline (pendingFor shows what a History session still has to send).
- * Developer-mode test data are marked source "test" (alerts) and test = true (live).
+ * <uid> = the Firebase account id (the same in accounts/ and drivers/). Alerts and trip summaries wait on the
+ * phone while offline (pendingFor shows what a History session still has to send).
  */
 class CloudSync(context: Context) {
     private val app = context.applicationContext
@@ -55,6 +55,19 @@ class CloudSync(context: Context) {
     private var online = false
     var role = ""
         private set
+    /** True once Firebase has answered (online, or from its offline copy): only then can "no role" mean removed. */
+    var roleChecked = false
+        private set
+
+    companion object {
+        private const val ROLE_PREFS = "role_cache_v1"
+        /** The last role this account had on this phone ("" = none): the app opens it directly, also offline. */
+        fun cachedRole(context: Context, uid: String): String =
+            context.getSharedPreferences(ROLE_PREFS, Context.MODE_PRIVATE).getString(uid, "") ?: ""
+        fun cacheRole(context: Context, uid: String, role: String) {
+            context.getSharedPreferences(ROLE_PREFS, Context.MODE_PRIVATE).edit().putString(uid, role).apply()
+        }
+    }
     val configured: Boolean get() = FirebaseApp.getApps(app).isNotEmpty()
     val signedIn: Boolean get() = configured && FirebaseAuth.getInstance().currentUser != null
     val email: String get() = if (signedIn) FirebaseAuth.getInstance().currentUser?.email ?: "" else ""
@@ -73,25 +86,23 @@ class CloudSync(context: Context) {
 
     private fun db() = FirebaseDatabase.getInstance(FIREBASE_DB_URL)
     private fun uid() = FirebaseAuth.getInstance().currentUser!!.uid
-    private fun driverId() = firebaseEmailKey(email)
+    private fun driverId() = uid() // drivers/<uid>: the same id as accounts/<uid>
 
     fun driversRef(): DatabaseReference = db().getReference("drivers")
     fun driverRef(driverId: String = driverId()): DatabaseReference = driversRef().child(driverId)
-    fun alertsRef(driverId: String = driverId()): DatabaseReference = db().getReference("alerts").child(driverId)
-
-    fun demoDriversRef(): DatabaseReference = db().getReference("demo/drivers")
-    fun demoEventsRef(driverId: String): DatabaseReference =
-        demoDriversRef().child(driverId).child("events")
+    fun alertsRef(driverId: String = driverId()): DatabaseReference = driverRef(driverId).child("alerts")
 
     fun start() {
         if (!configured) { onChange?.invoke(); return }
         val auth = FirebaseAuth.getInstance()
         if (auth.currentUser?.email.isNullOrBlank()) { onChange?.invoke(); return }
-        roleRef = db().getReference("roles").child(uid())
+        role = cachedRole(app, uid()) // until Firebase answers (e.g. offline): the last known role
+        roleRef = db().getReference("accounts").child(uid()).child("role")
         roleListener = object : ValueEventListener {
             override fun onDataChange(snapshot: DataSnapshot) {
                 role = snapshot.getValue(String::class.java) ?: ""
-                if (!snapshot.exists()) toast("No role assigned to this account yet")
+                roleChecked = true
+                cacheRole(app, uid(), role)
                 onChange?.invoke()
                 if (role == "driver" && online) flush()
             }
@@ -123,6 +134,7 @@ class CloudSync(context: Context) {
     }
 
     fun signOut() {
+        if (signedIn) cacheRole(app, uid(), "")
         stop(); if (configured) FirebaseAuth.getInstance().signOut()
         role = ""; online = false; onChange?.invoke()
     }
@@ -151,38 +163,51 @@ class CloudSync(context: Context) {
 
     private fun level(severity: String) = when (Ui.riskLevel(severity)) { "HIGH" -> "HIGH"; "MEDIUM" -> "MEDIUM"; else -> "LOW" }
 
-    /** Use one explicit time zone so Firebase dates are understandable across phones. */
-    private fun formatPht(timestampMs: Long, pattern: String): String =
-        SimpleDateFormat(pattern, Locale.US).apply {
-            timeZone = TimeZone.getTimeZone("Asia/Manila")
-        }.format(Date(timestampMs))
-
-    private fun readableTime(timestampMs: Long) = formatPht(timestampMs, "yyyy-MM-dd hh:mm:ss a 'PHT'")
-
     /**
      * One alert. Real alerts: test = false, push = the alert state machine's push flag (once per HIGH
      * alert, at most one per minute). Developer-mode tests: test = true.
      */
     fun record(behavior: String, severity: String, sessionId: String, test: Boolean = true, push: Boolean = false) {
-        val timestampMs = System.currentTimeMillis() // Event time, even if Firebase sync happens later.
-        val id = formatPht(timestampMs, "yyyy-MM-dd_HH-mm-ss_SSS") + "_PHT_" + UUID.randomUUID()
-        enqueue(JSONObject().put("type", "alert").put("id", id).put("sessionId", sessionId).put("data", JSONObject()
-            .put("behavior", behavior).put("level", level(severity)).put("timestampMs", timestampMs)
-            .put("occurredAtPht", readableTime(timestampMs))
-            .put("eventDatePht", formatPht(timestampMs, "yyyy-MM-dd"))
-            .put("eventTimePht", formatPht(timestampMs, "hh:mm:ss a"))
-            .put("sessionId", sessionId).put("source", if (test) "test" else "device").put("push", push)))
+        val now = System.currentTimeMillis()
+        val slug = behavior.lowercase(Locale.ROOT).replace(Regex("[^a-z0-9]+"), "-").trim('-').take(40).ifEmpty { "alert" }
+        val id = stamp(now, "yyyy-MM-dd_HH-mm-ss-SSS") + "_" + slug  // readable key, e.g. 2026-11-27_17-42-10-123_eye-closure
+        val trip = tripKey(sessionId)
+        enqueue(JSONObject().put("type", "alert").put("id", id).put("sessionId", sessionId).put("trip", trip).put("data", JSONObject()
+            .put("time", stamp(now, "yyyy-MM-dd HH:mm:ss")).put("timestampMs", now).put("trip", trip)
+            .put("behaviour", behavior).put("level", level(severity)).put("sentToSupervisor", push).put("test", test)))
     }
+
+    private fun stamp(ms: Long, pattern: String): String = java.text.SimpleDateFormat(pattern, Locale.US).format(Date(ms))
+
+    /** The readable trip key of a session (its start time), saved when the trip starts. */
+    private fun tripKey(sessionId: String): String = prefs.getString("trip_$sessionId", null) ?: sessionId
 
     /** Session start / end summary (merged into drivers/<driver>/sessions/<session>). */
     fun recordSession(sessionId: String, fields: Map<String, Any?>) {
         val data = JSONObject()
         for ((k, v) in fields) data.put(k, v ?: JSONObject.NULL)
-        (fields["startedMs"] as? Number)?.toLong()?.let { data.put("startedAtPht", readableTime(it)) }
-        (fields["endedMs"] as? Number)?.toLong()?.let { data.put("endedAtPht", readableTime(it)) }
+        (fields["startedMs"] as? Number)?.toLong()?.let { ms ->
+            prefs.edit().putString("trip_$sessionId", stamp(ms, "yyyy-MM-dd_HH-mm-ss")).apply()
+            data.put("started", stamp(ms, "yyyy-MM-dd HH:mm:ss"))
+        }
+        (fields["endedMs"] as? Number)?.toLong()?.let { data.put("ended", stamp(it, "yyyy-MM-dd HH:mm:ss")) }
+        (fields["durationS"] as? Number)?.toLong()?.let { data.put("minutes", Math.round(it / 6.0) / 10.0) }
         enqueue(JSONObject().put("type", "session").put("id", UUID.randomUUID().toString())
-            .put("sessionId", sessionId).put("data", data))
+            .put("sessionId", sessionId).put("trip", tripKey(sessionId)).put("data", data))
     }
+
+    /** CPECAPS: the name the supervisor sees (Firebase profile + drivers/<d>/name). */
+    fun updateName(name: String, done: (Boolean, String) -> Unit) {
+        val user = FirebaseAuth.getInstance().currentUser ?: run { done(false, "Not signed in"); return }
+        user.updateProfile(com.google.firebase.auth.UserProfileChangeRequest.Builder().setDisplayName(name).build())
+            .addOnCompleteListener { t ->
+                if (t.isSuccessful) db().getReference("accounts").child(uid()).child("name").setValue(name)
+                if (t.isSuccessful && role == "driver") driverRef().updateChildren(mapOf("name" to name))
+                done(t.isSuccessful, if (t.isSuccessful) "Name saved" else (t.exception?.message ?: "Could not save the name"))
+            }
+    }
+
+    val shownName: String get() = displayName()
 
     private fun displayName(): String =
         FirebaseAuth.getInstance().currentUser?.displayName?.takeIf { it.isNotBlank() } ?: email
@@ -191,13 +216,7 @@ class CloudSync(context: Context) {
     private fun updateLive(fields: Map<String, Any?>) {
         val changes = mutableMapOf<String, Any?>("name" to displayName(), "email" to email)
         for ((k, v) in fields) changes["live/$k"] = v
-        (fields["timestampMs"] as? Number)?.toLong()?.let {
-            changes["live/updatedAtPht"] = readableTime(it)
-        }
-        if ("locationTimestampMs" in fields) {
-            changes["live/locationUpdatedAtPht"] = (fields["locationTimestampMs"] as? Number)
-                ?.toLong()?.let { readableTime(it) }
-        }
+        changes["live/updated"] = stamp(System.currentTimeMillis(), "yyyy-MM-dd HH:mm:ss")
         driverRef().updateChildren(changes)
     }
 
@@ -259,7 +278,7 @@ class CloudSync(context: Context) {
         val driver = item.optString("driver").ifBlank { driverId() }
         val data = toMap(item.optJSONObject("data") ?: JSONObject())
         val task = if (item.optString("type") == "session")
-            driverRef(driver).child("sessions").child(item.optString("sessionId")).updateChildren(data)
+            driverRef(driver).child("trips").child(item.optString("trip").ifBlank { item.optString("sessionId") }).updateChildren(data)
         else alertsRef(driver).child(item.optString("id")).setValue(data)
         task.addOnCompleteListener { result ->
             flushing = false
@@ -288,7 +307,7 @@ class CloudSync(context: Context) {
     /** Stop push notifications to this phone (Settings switch off, or sign-out). */
     fun unregisterSupervisorPush() {
         if (!signedIn || role != "supervisor") return
-        db().getReference("supervisorTokens").child(uid()).setValue(null)
+        db().getReference("supervisorPhones").child(uid()).setValue(null)
             .addOnFailureListener { toast("Could not turn notifications off: ${it.localizedMessage}") }
     }
 
@@ -296,7 +315,7 @@ class CloudSync(context: Context) {
         if (!ready || role != "supervisor" || email.isBlank()) return
         FirebaseMessaging.getInstance().token.addOnSuccessListener { token ->
             // Restricted in the database rules to verified supervisor accounts.
-            db().getReference("supervisorTokens").child(uid()).setValue(token)
+            db().getReference("supervisorPhones").child(uid()).setValue(token)
                 .addOnFailureListener { toast("Push registration failed: ${it.localizedMessage}") }
         }.addOnFailureListener { toast("FCM token unavailable: ${it.localizedMessage}") }
     }

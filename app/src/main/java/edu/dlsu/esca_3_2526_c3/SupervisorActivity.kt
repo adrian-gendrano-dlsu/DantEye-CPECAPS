@@ -10,8 +10,6 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.view.ViewGroup
-import android.webkit.WebView
-import android.webkit.WebViewClient
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.ScrollView
@@ -54,20 +52,45 @@ class SupervisorActivity : Activity() {
     private lateinit var cloud: CloudSync
     private var driversReference: DatabaseReference? = null
     private var driversListener: ValueEventListener? = null
-    private var demoDriversReference: DatabaseReference? = null
-    private var demoDriversListener: ValueEventListener? = null
-    private var rootDriverNodes = emptyList<DataSnapshot>()
-    private var demoDriverNodes = emptyList<DataSnapshot>()
     private var driverNodes = emptyList<DataSnapshot>()
     // alerts/<driver>: one listener per driver (newest 100), rows by driver id
     private val alertListeners = mutableMapOf<String, Pair<com.google.firebase.database.Query, ValueEventListener>>()
     private val alertRows = mutableMapOf<String, List<AlertRow>>()
-    private val demoAlertListeners = mutableMapOf<String, Pair<com.google.firebase.database.Query, ValueEventListener>>()
-    private val demoAlertRows = mutableMapOf<String, List<AlertRow>>()
     private var drivers = emptyList<Driver>()
     private var tab = "drivers"
     private var selectedId: String? = null
     private var highOnly = false
+    // CPECAPS: search, filters and sorting (the search box is kept while the page refreshes every 2 s)
+    private var driverFilter = "all"     // all | live | risk | offline
+    private var driverSort = "urgent"    // urgent | name | recent
+    private var alertPeriod = "week"     // today | week | all
+    private var searchText = ""
+    private val searchBox: android.widget.EditText by lazy {
+        android.widget.EditText(this).apply {
+            hint = "Search drivers or alerts"
+            setSingleLine()
+            textSize = 15f
+            if (Ui.nightMode) { setTextColor(android.graphics.Color.WHITE); setHintTextColor(android.graphics.Color.LTGRAY) }
+            addTextChangedListener(object : android.text.TextWatcher {
+                override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) = Unit
+                override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) = Unit
+                override fun afterTextChanged(e: android.text.Editable?) {
+                    val t = e?.toString()?.trim().orEmpty()
+                    if (t != searchText) { searchText = t; render() }
+                }
+            })
+        }
+    }
+
+    /** The shared search box, moved into the given card. */
+    private fun addSearch(card: LinearLayout) {
+        val hadFocus = searchBox.hasFocus()
+        (searchBox.parent as? ViewGroup)?.removeView(searchBox)
+        card.addView(searchBox, LinearLayout.LayoutParams(-1, -2))
+        if (hadFocus) searchBox.post { searchBox.requestFocus() }
+    }
+
+    private fun matches(vararg fields: String) = searchText.isEmpty() || fields.any { it.contains(searchText, ignoreCase = true) }
     private lateinit var root: LinearLayout
     private lateinit var content: LinearLayout
     private lateinit var scroll: ScrollView
@@ -75,18 +98,15 @@ class SupervisorActivity : Activity() {
     private lateinit var driversTab: TextView
     private lateinit var alertsTab: TextView
     private lateinit var settingsTab: TextView
-    private var mapView: WebView? = null
-    private var mapPosition: Pair<Double, Double>? = null
-    private var mapCard: LinearLayout? = null
-    private var mapDriverId: String? = null
-    private var mapLocationLabel: TextView? = null
-    private var mapCoordinatesLabel: TextView? = null
-    private var mapOpenButton: Button? = null
-    private var mapReady = false
+    private var liveMap: LiveMap? = null      // CPECAPS: moving map, kept across page refreshes
+    private var liveMapDriver: String? = null
+    private var netBanner: NetBanner? = null  // CPECAPS: "No internet" strip
     private val handler = Handler(Looper.getMainLooper())
     private val ageLabels = mutableMapOf<String, TextView>()
     private var shownStates = emptyMap<String, String>()
     private val prefs by lazy { getSharedPreferences("supervisor_prefs", MODE_PRIVATE) }
+    // Roles in the app (Settings > People)
+    private val people by lazy { PeopleManager(this) { if (!isFinishing) { if (tab == "settings" || (tab == "drivers" && selectedId == null)) render() } } }
 
     private val refreshAges = object : Runnable {
         override fun run() {
@@ -105,6 +125,7 @@ class SupervisorActivity : Activity() {
         root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(Ui.canvas) }
         val header = Ui.header(this, "Supervisor Dashboard")
         root.addView(header)
+        netBanner = NetBanner(this, root, root.childCount, "No internet · driver updates and alerts will arrive when it is back")
         scroll = ScrollView(this).apply { isFillViewport = true }
         content = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -128,6 +149,7 @@ class SupervisorActivity : Activity() {
 
         cloud = CloudSync(this)
         cloud.onChange = roleChanged@{
+            if (cloud.roleChecked && cloud.signedIn && cloud.role.isEmpty()) { accessRemoved(); return@roleChanged }
             if (cloud.role == "driver") {
                 startActivity(Intent(this, MainActivity::class.java))
                 finish()
@@ -141,6 +163,23 @@ class SupervisorActivity : Activity() {
         }
         cloud.start()
         render()
+    }
+
+    /** A supervisor removed this account's access (checked once online): tell the user, stop, sign out. */
+    private var removedShown = false
+    private fun accessRemoved() {
+        if (removedShown || isFinishing) return
+        removedShown = true
+        detachDrivers()
+        android.app.AlertDialog.Builder(this)
+            .setTitle("Access removed")
+            .setMessage("A supervisor removed your access to Danteye. Ask your supervisor if this is a mistake.")
+            .setCancelable(false)
+            .setPositiveButton("OK") { _, _ ->
+                cloud.signOut()
+                startActivity(Intent(this, LauncherActivity::class.java))
+                finish()
+            }.show()
     }
 
     /** Notification taps open the corresponding driver's page. */
@@ -164,9 +203,10 @@ class SupervisorActivity : Activity() {
 
     override fun onDestroy() {
         detachDrivers()
-        (mapView?.parent as? ViewGroup)?.removeView(mapView)
-        mapView?.destroy()
-        mapView = null
+        (liveMap?.view?.parent as? ViewGroup)?.removeView(liveMap?.view)
+        liveMap?.destroy()
+        liveMap = null
+        netBanner?.close()
         cloud.stop()
         super.onDestroy()
     }
@@ -191,52 +231,30 @@ class SupervisorActivity : Activity() {
 
     // ------------------------------------------------------------------ Firebase
 
-    /** The roster comes from both Firebase driver paths. */
+    /** The roster comes from Firebase (never hard-coded drivers); alerts are read from the same snapshot. */
     private fun attachDrivers() {
         if (driversListener != null || cloud.role != "supervisor") return
+        people.attach()
         driversReference = cloud.driversRef()
         driversListener = object : ValueEventListener {
             override fun onDataChange(snapshot: DataSnapshot) {
-                rootDriverNodes = snapshot.children.toList()
-                rebuildDrivers()
+                driverNodes = snapshot.children.toList()
+                driverNodes.mapNotNull { it.key }.forEach { attachAlerts(it) }
+                drivers = driverNodes.mapNotNull { parseDriver(it) }
+                // Settings is not rebuilt by live data (only the Alerts count on the tab changes).
+                if (!isFinishing) { if (tab != "settings") render() else updateAlertsTab() }
             }
             override fun onCancelled(error: DatabaseError) {
                 cloud.toast("Driver list unavailable: ${error.message}")
             }
         }
         driversReference!!.addValueEventListener(driversListener!!)
-
-        demoDriversReference = cloud.demoDriversRef()
-        demoDriversListener = object : ValueEventListener {
-            override fun onDataChange(snapshot: DataSnapshot) {
-                demoDriverNodes = snapshot.children.toList()
-                rebuildDrivers()
-            }
-            override fun onCancelled(error: DatabaseError) {
-                cloud.toast("Demo driver list unavailable: ${error.message}")
-            }
-        }
-        demoDriversReference!!.addValueEventListener(demoDriversListener!!)
-
         if (Build.VERSION.SDK_INT >= 33 && pushEnabled() &&
             checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED)
             requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 77)
         if (pushEnabled()) cloud.registerSupervisorPush()
-    }
-
-    private fun rebuildDrivers() {
-        driverNodes = (rootDriverNodes + demoDriverNodes)
-            .groupBy { it.key }
-            .values.mapNotNull { nodes ->
-                nodes.maxByOrNull {
-                    it.child("live").child("timestampMs").getValue(Long::class.java) ?: 0L
-                }
-            }
-        driverNodes.mapNotNull { it.key }.forEach { attachAlerts(it) }
-        drivers = driverNodes.mapNotNull { parseDriver(it) }
-        if (!isFinishing) {
-            if (tab != "settings") render() else updateAlertsTab()
-        }
+        // CPECAPS: background watcher for HIGH risk (independent of the cloud function).
+        if (pushEnabled()) SupervisorAlertService.start(this)
     }
 
     /** Newest 100 alerts of one driver; re-parses that driver's row when they change. */
@@ -247,10 +265,10 @@ class SupervisorActivity : Activity() {
             override fun onDataChange(snapshot: DataSnapshot) {
                 alertRows[driverId] = snapshot.children.mapNotNull { e ->
                     val ms = e.child("timestampMs").getValue(Long::class.java) ?: return@mapNotNull null
-                    AlertRow(driverId, "", e.child("behavior").getValue(String::class.java) ?: "Alert", ms,
+                    AlertRow(driverId, "", (e.child("behaviour").getValue(String::class.java) ?: e.child("behavior").getValue(String::class.java) ?: "Alert"), ms,
                         e.child("level").getValue(String::class.java) ?: "MEDIUM",
-                        e.child("source").getValue(String::class.java) == "test",
-                        e.child("sessionId").getValue(String::class.java) ?: "")
+                        e.child("test").getValue(Boolean::class.java) == true,
+                        e.child("trip").getValue(String::class.java) ?: "")
                 }
                 drivers = driverNodes.mapNotNull { parseDriver(it) }
                 if (!isFinishing) { if (tab != "settings") render() else updateAlertsTab() }
@@ -259,68 +277,38 @@ class SupervisorActivity : Activity() {
         }
         query.addValueEventListener(listener)
         alertListeners[driverId] = query to listener
-
-        val demoQuery = cloud.demoEventsRef(driverId).orderByChild("timestampMs").limitToLast(100)
-        val demoListener = object : ValueEventListener {
-            override fun onDataChange(snapshot: DataSnapshot) {
-                demoAlertRows[driverId] = snapshot.children.mapNotNull { e ->
-                    val ms = e.child("timestampMs").getValue(Long::class.java) ?: return@mapNotNull null
-                    AlertRow(driverId, "", e.child("behavior").getValue(String::class.java) ?: "Alert", ms,
-                        e.child("severity").getValue(String::class.java) ?: "Warning",
-                        e.child("simulated").getValue(Boolean::class.java) == true ||
-                                e.child("source").getValue(String::class.java) == "test",
-                        e.child("sessionId").getValue(String::class.java) ?: "")
-                }
-                drivers = driverNodes.mapNotNull { parseDriver(it) }
-                if (!isFinishing) { if (tab != "settings") render() else updateAlertsTab() }
-            }
-            override fun onCancelled(error: DatabaseError) {
-                cloud.toast("Demo events unavailable: ${error.message}")
-            }
-        }
-        demoQuery.addValueEventListener(demoListener)
-        demoAlertListeners[driverId] = demoQuery to demoListener
     }
 
     private fun detachDrivers() {
+        people.detach()
         driversListener?.let { driversReference?.removeEventListener(it) }
-        demoDriversListener?.let { demoDriversReference?.removeEventListener(it) }
         driversReference = null; driversListener = null
-        demoDriversReference = null; demoDriversListener = null
         alertListeners.values.forEach { (q, l) -> q.removeEventListener(l) }
-        demoAlertListeners.values.forEach { (q, l) -> q.removeEventListener(l) }
-        alertListeners.clear(); alertRows.clear()
-        demoAlertListeners.clear(); demoAlertRows.clear()
-        rootDriverNodes = emptyList(); demoDriverNodes = emptyList()
-        driverNodes = emptyList()
+        alertListeners.clear(); alertRows.clear(); driverNodes = emptyList()
         drivers = emptyList()
     }
 
     private fun parseDriver(node: DataSnapshot): Driver? {
+        // New layout: drivers/<uid>. A driver whose live status never reached Firebase (for example no internet on
+        // DMS-NET) is still listed (as OFFLINE) with the trips and alerts that were synced.
         val live = node.child("live")
-        if (!live.exists()) return null
         val id = node.key ?: return null
-        if (!id.contains("@")) return null // ignore old UID-keyed records
+        if (!live.exists() && !node.child("trips").exists() && !node.child("alerts").exists() &&
+            !node.child("name").exists() && !node.child("email").exists()) return null
         val lat = live.child("lat").getValue(Double::class.java)
         val lng = live.child("lng").getValue(Double::class.java)
         val valid = lat != null && lng != null && lat.isFinite() && lng.isFinite() &&
                 lat in -90.0..90.0 && lng in -180.0..180.0 && !(lat == 0.0 && lng == 0.0)
         val name = node.child("name").getValue(String::class.java)?.takeIf { it.isNotBlank() }
-            ?: node.child("email").getValue(String::class.java)
-            ?: live.child("name").getValue(String::class.java)
-            ?: live.child("email").getValue(String::class.java)
-            ?: id.replace("-", ".").replace("%2D", "-")
+            ?: node.child("email").getValue(String::class.java) ?: "Driver"
         // Alerts, oldest first; a MEDIUM test escalated to HIGH within 12 s shows once as HIGH.
         val rows = mutableListOf<AlertRow>()
-        (alertRows[id].orEmpty() + demoAlertRows[id].orEmpty())
-            .distinctBy { Triple(it.ms, it.name, it.session) }
-            .map { it.copy(driverName = name) }.sortedBy { it.ms }.forEach { row ->
-                val prior = rows.indexOfLast { it.session == row.session && row.session.isNotBlank() && it.name == row.name &&
-                        Ui.riskLevel(it.level) == "MEDIUM" && Ui.riskLevel(row.level) == "HIGH" && row.ms - it.ms in 0..12_000L }
-                if (prior >= 0) rows[prior] = rows[prior].copy(level = row.level) else rows.add(row)
-            }
-        val sessionsNode = rootDriverNodes.firstOrNull { it.key == id } ?: node
-        val sessions = sessionsNode.child("sessions").children.mapNotNull { sn ->
+        (alertRows[id] ?: emptyList()).map { it.copy(driverName = name) }.sortedBy { it.ms }.forEach { row ->
+            val prior = rows.indexOfLast { it.session == row.session && row.session.isNotBlank() && it.name == row.name &&
+                    Ui.riskLevel(it.level) == "MEDIUM" && Ui.riskLevel(row.level) == "HIGH" && row.ms - it.ms in 0..12_000L }
+            if (prior >= 0) rows[prior] = rows[prior].copy(level = row.level) else rows.add(row)
+        }
+        val sessions = node.child("trips").children.mapNotNull { sn ->
             val started = sn.child("startedMs").getValue(Long::class.java) ?: return@mapNotNull null
             SessionRow(sn.key ?: "", started, sn.child("durationS").getValue(Long::class.java) ?: 0L,
                 sn.child("alerts").getValue(Long::class.java)?.toInt() ?: 0,
@@ -418,36 +406,8 @@ class SupervisorActivity : Activity() {
 
     private fun render(scrollTop: Boolean = false) {
         val scrollY = if (scrollTop) 0 else scroll.scrollY
-
-        val keepMap = tab == "drivers" &&
-                selectedId == mapDriverId &&
-                mapCard?.parent === content &&
-                drivers.any {
-                    it.id == selectedId && it.lat != null &&
-                            it.lng != null && it.locationTime > 0L
-                }
-
-        if (!keepMap) {
-            mapView?.let {
-                (it.parent as? ViewGroup)?.removeView(it)
-                it.destroy()
-            }
-            mapView = null
-            mapPosition = null
-            mapCard = null
-            mapDriverId = null
-            mapLocationLabel = null
-            mapCoordinatesLabel = null
-            mapOpenButton = null
-            mapReady = false
-        }
-
-        val retainedCard = if (keepMap) mapCard else null
-        for (i in content.childCount - 1 downTo 0) {
-            if (content.getChildAt(i) !== retainedCard) {
-                content.removeViewAt(i)
-            }
-        }
+        content.minimumHeight = if (scrollY > 0) content.height else 0 // no collapse -> no jump to the top
+        content.removeAllViews()
         ageLabels.clear()
         Ui.activeTab(driversTab, tab == "drivers")
         Ui.activeTab(alertsTab, tab == "alerts")
@@ -460,7 +420,7 @@ class SupervisorActivity : Activity() {
         else if (tab == "alerts") showAlerts()
         else selectedId?.let { showDriverDetails(it) } ?: showDriverList()
         updateAgeLabels()
-        scroll.post { if (!isFinishing) scroll.scrollTo(0, scrollY) }
+        scroll.post { if (!isFinishing) { scroll.scrollTo(0, scrollY); content.minimumHeight = 0 } }
     }
 
     private fun showSignInNeeded() {
@@ -472,7 +432,7 @@ class SupervisorActivity : Activity() {
             text = if (cloud.signedIn) "Use another account" else "Sign in"
             isAllCaps = false
             setOnClickListener {
-                if (cloud.signedIn) { detachDrivers(); cloud.signOut() }
+                if (cloud.signedIn) { SupervisorAlertService.stop(this@SupervisorActivity); detachDrivers(); cloud.signOut() }
                 startActivity(Intent(this@SupervisorActivity, LauncherActivity::class.java))
                 finish()
             }
@@ -484,28 +444,50 @@ class SupervisorActivity : Activity() {
         Ui.statusPanel(this, "$count\n$label", color, 15f).apply { contentDescription = "$count $label" }
 
     private fun showDriverList() {
-        val summary = Ui.card(this)
-        summary.addView(Ui.title(this, "Overview"))
+        people.addWaitingBanner(content) { open("settings") }
+        // Fleet banner + number tiles (fleet-app style, Sui).
         val states = drivers.map { stateOf(it) }
         val monitoring = states.count { it !in setOf("OFFLINE", "NOT MONITORING") }
-        val row = LinearLayout(this)
-        listOf(summaryTile(monitoring, "Monitoring", Ui.blue), summaryTile(states.count { it == "HIGH" }, "HIGH", Ui.red),
-            summaryTile(states.count { it == "MEDIUM" }, "MEDIUM", Ui.orange),
-            summaryTile(states.count { it == "OFFLINE" }, "Offline", Ui.muted)).forEach {
-            row.addView(it, LinearLayout.LayoutParams(0, -2, 1f).apply {
-                setMargins(Ui.dp(this@SupervisorActivity, 2), 0, Ui.dp(this@SupervisorActivity, 2), 0)
-            })
-        }
-        summary.addView(row)
+        val attention = states.count { it == "HIGH" || it == "MEDIUM" }
         val today = allAlerts().filter { it.ms >= startOfToday() && !it.simulated }
-        summary.addView(Ui.note(this, "Alerts today: ${today.size} (${today.count { Ui.riskLevel(it.level) == "HIGH" }} HIGH)"))
-        content.addView(summary, Ui.blockParams(this))
+        val highToday = today.count { Ui.riskLevel(it.level) == "HIGH" }
+        content.addView(Sui.hero(this, "FLEET NOW",
+            when { attention > 0 -> "$attention need${if (attention == 1) "s" else ""} attention"; monitoring > 0 -> "All drivers OK"; else -> "No one is driving" },
+            when { states.any { it == "HIGH" } -> Ui.red; attention > 0 -> Ui.orange; monitoring > 0 -> Ui.green; else -> Ui.navy },
+            "$monitoring driving · ${today.size} alert${if (today.size == 1) "" else "s"} today" + if (highToday > 0) " ($highToday HIGH)" else ""),
+            Ui.blockParams(this))
+        content.addView(Sui.row(this, listOf(Sui.statTile(this, "$monitoring", "Driving", Ui.blue),
+            Sui.statTile(this, "${states.count { it == "HIGH" }}", "High", Ui.red),
+            Sui.statTile(this, "${states.count { it == "MEDIUM" }}", "Medium", Ui.orange),
+            Sui.statTile(this, "${states.count { it == "OFFLINE" }}", "Offline", Ui.muted))), Ui.blockParams(this))
 
         val list = Ui.card(this)
-        list.addView(Ui.title(this, "Drivers"))
+        list.addView(Ui.title(this, "Drivers (${drivers.size})"))
         if (drivers.isEmpty()) list.addView(Ui.note(this,
             "No drivers yet. A driver appears here after signing in with a driver account and starting monitoring."))
-        drivers.sortedWith(compareBy<Driver> { urgency(it) }.thenBy { it.name.lowercase(Locale.ROOT) }).forEach { d ->
+        if (drivers.isNotEmpty()) {
+            addSearch(list)
+            list.addView(Ui.choiceRow(this, "Show", listOf("all" to "All", "live" to "Monitoring", "risk" to "At risk", "offline" to "Offline"),
+                driverFilter) { driverFilter = it; render(scrollTop = true) })
+            list.addView(Ui.choiceRow(this, "Sort by", listOf("urgent" to "Most urgent", "name" to "Name", "recent" to "Latest update"),
+                driverSort) { driverSort = it; render(scrollTop = true) })
+        }
+        val shown = drivers.filter { d ->
+            val st = stateOf(d)
+            matches(d.name, d.id, d.event) && when (driverFilter) {
+                "live" -> st !in setOf("OFFLINE", "NOT MONITORING")
+                "risk" -> st in setOf("HIGH", "MEDIUM", "LOW")
+                "offline" -> st == "OFFLINE"
+                else -> true
+            }
+        }.sortedWith(when (driverSort) {
+            "name" -> compareBy { it.name.lowercase(Locale.ROOT) }
+            "recent" -> compareByDescending { it.lastUpdate }
+            else -> compareBy<Driver> { urgency(it) }.thenBy { it.name.lowercase(Locale.ROOT) }
+        })
+        if (drivers.isNotEmpty() && shown.isEmpty()) list.addView(Ui.note(this, "No drivers match."))
+        var lastGroup = ""
+        shown.forEach { d ->
             val state = stateOf(d)
             val live = state !in setOf("OFFLINE", "NOT MONITORING")
             val detail = buildList {
@@ -515,27 +497,24 @@ class SupervisorActivity : Activity() {
                 if (live && d.alertState == "ALERTING") add("🔔 alarm sounding")
                 if (d.simulated && live) add("test data")
             }.joinToString(" · ")
-            val r = Ui.monitorRow(this, d.name, state, detail, stateColor(state), false)
+            val group = when (state) { "HIGH", "MEDIUM" -> "NEEDS ATTENTION"; "OFFLINE", "NOT MONITORING" -> "NOT DRIVING"; else -> "DRIVING" }
+            if (driverSort == "urgent" && group != lastGroup) {
+                lastGroup = group
+                val n = shown.count { x -> when (stateOf(x)) { "HIGH", "MEDIUM" -> "NEEDS ATTENTION"; "OFFLINE", "NOT MONITORING" -> "NOT DRIVING"; else -> "DRIVING" } == group }
+                list.addView(Sui.sectionHeader(this, group, n, when (group) { "NEEDS ATTENTION" -> Ui.red; "DRIVING" -> Ui.green; else -> Ui.muted }))
+            }
+            val age = Ui.note(this, "")
+            ageLabels[d.id] = age
+            val r = Sui.driverCard(this, d.name, state, stateColor(state), detail, age, live && d.alertState == "ALERTING")
             r.setOnClickListener { selectedId = d.id; render(scrollTop = true) }
             r.contentDescription = "${d.name}: $state. $detail. Open details"
             list.addView(r)
-            ageLabels[d.id] = Ui.note(this, "").also { list.addView(it) }
         }
         content.addView(list, Ui.blockParams(this))
     }
 
     private fun showDriverDetails(id: String) {
-        val retainedMap = mapCard?.takeIf {
-            it.parent === content && mapDriverId == id
-        }
-
-        fun addBeforeMap(view: android.view.View, params: LinearLayout.LayoutParams) {
-            val index = retainedMap?.let { content.indexOfChild(it) } ?: -1
-            if (index >= 0) content.addView(view, index, params)
-            else content.addView(view, params)
-        }
-
-        addBeforeMap(Ui.linkRow(this, "‹ All drivers", "") { selectedId = null; render(scrollTop = true) }, Ui.blockParams(this))
+        content.addView(Ui.linkRow(this, "‹ All drivers", "") { selectedId = null; render(scrollTop = true) }, Ui.blockParams(this))
         val d = drivers.firstOrNull { it.id == id }
         if (d == null) {
             content.addView(Ui.note(this, "Waiting for this driver's first update."))
@@ -543,197 +522,56 @@ class SupervisorActivity : Activity() {
         }
         val state = stateOf(d)
 
-        val status = Ui.card(this)
-        status.addView(Ui.title(this, d.name))
-        status.addView(Ui.statusPanel(this, when (state) {
-            "HIGH", "MEDIUM", "LOW" -> "$state RISK"
-            else -> state
-        }, stateColor(state)), LinearLayout.LayoutParams(-1, -2))
-        status.addView(Ui.space(this, 8))
-        ageLabels[d.id] = Ui.note(this, "").also { status.addView(it) }
-        status.addView(Ui.pair(this, "Now", if (state == "OFFLINE") "Last known: ${d.event}" else d.event))
-        if (d.alertState.isNotBlank()) status.addView(Ui.pair(this, "Alarm", when (d.alertState) {
-            "ALERTING" -> "🔔 Sounding"; "CLEARED" -> "Stopped (risk still raised)"; "UNAVAILABLE" -> "No camera picture"
-            "STOPPED" -> "Monitoring stopped"; else -> "No alarm"
-        }))
-        d.riskScore?.takeIf { !d.simulated }?.let {
-            status.addView(Ui.pair(this, "Risk score", String.format(Locale.US, "%.0f / 100", it)))
-        }
-        status.addView(Ui.pair(this, "Driving time", "${d.tripSeconds / 60} min ${d.tripSeconds % 60} s"))
-        status.addView(Ui.pair(this, "Speed", d.speedKph?.let { String.format(Locale.US, "%.0f km/h", it) } ?: "No GPS speed"))
-        if (d.simulated) status.addView(Ui.note(this, "These values come from a developer-mode test, not from the camera."))
-        addBeforeMap(status, Ui.blockParams(this))
+        // Driver banner + facts grid (Sui).
+        val ageLabel = Ui.note(this, "")
+        ageLabels[d.id] = ageLabel
+        content.addView(Sui.hero(this, d.name.uppercase(), when (state) { "HIGH", "MEDIUM", "LOW" -> "$state RISK"; else -> state },
+            stateColor(state), if (state == "OFFLINE") "Last known: ${d.event}" else d.event, ageLabel), Ui.blockParams(this))
+        val todayCount = d.alerts.count { it.ms >= startOfToday() && !it.simulated }
+        content.addView(Sui.factGrid(this, listOf(
+            "Driving time" to "${d.tripSeconds / 60} min",
+            "Speed" to (d.speedKph?.let { String.format(Locale.US, "%.0f km/h", it) } ?: "No GPS"),
+            "Alarm" to when (d.alertState) { "ALERTING" -> "🔔 Sounding"; "UNAVAILABLE" -> "No camera"; "STOPPED" -> "Stopped"; else -> "Off" },
+            "Alerts today" to "$todayCount")), Ui.blockParams(this))
+        if (d.simulated) content.addView(Ui.note(this, "Test values from the driver's phone, not from the camera."), Ui.blockParams(this))
 
         if (d.statuses.isNotEmpty()) {
             val behaviours = Ui.card(this)
             behaviours.addView(Ui.title(this, "Behaviours now"))
-            for ((behaviour, level) in d.statuses) {
-                behaviours.addView(Ui.alert(this, Ui.alertCause(behaviour), "", Ui.riskLevel(level), Ui.riskColor(level)))
-            }
-            addBeforeMap(behaviours, Ui.blockParams(this))
+            behaviours.addView(Sui.behaviourGrid(this, d.statuses.map { (behaviour, level) -> Ui.alertCause(behaviour) to level }))
+            content.addView(behaviours, Ui.blockParams(this))
         }
 
-        val location = mapCard?.takeIf {
-            it.parent === content && mapDriverId == id
-        } ?: Ui.card(this)
-
+        val location = Ui.card(this)
+        location.addView(Ui.title(this, "Location"))
         val lat = d.lat
         val lng = d.lng
-
         if (lat == null || lng == null || d.locationTime <= 0L) {
-            location.addView(Ui.title(this, "Location"))
-            location.addView(Ui.note(this,
-                "No location yet (the GPS on the sensor board has no fix)."))
+            location.addView(Ui.note(this, "No location yet (no GPS fix on the sensor board or the driver's phone)."))
         } else {
             val age = (System.currentTimeMillis() - d.locationTime).coerceAtLeast(0L)
-            val label = if (d.locationSource == "manual")
-                "manual test location" else "GPS position"
-            val locationText = if (age > 60_000L)
-                "Last known $label · ${age / 60_000} min old"
-            else "Latest $label"
-            val coordinatesText = String.format(
-                Locale.US, "%.6f, %.6f", lat, lng
-            )
-
-            if (location !== mapCard) {
-                location.addView(Ui.title(this, "Location"))
-
-                mapLocationLabel = Ui.note(this, locationText).also {
-                    location.addView(it)
-                }
-
-                val coordinatesRow = Ui.pair(
-                    this, "Coordinates", coordinatesText
-                )
-                mapCoordinatesLabel =
-                    coordinatesRow.getChildAt(1) as TextView
-                location.addView(coordinatesRow)
-
-                val map = WebView(this).apply {
-                    settings.javaScriptEnabled = true
-                    setBackgroundColor(
-                        android.graphics.Color.rgb(232, 235, 235)
-                    )
-                    webViewClient = object : WebViewClient() {
-                        override fun onPageFinished(
-                            view: WebView, url: String?
-                        ) {
-                            if (view !== mapView) return
-                            mapReady = true
-                            mapPosition?.let { p ->
-                                view.evaluateJavascript(
-                                    "window.moveDriver && window.moveDriver(${p.first},${p.second});",
-                                    null
-                                )
-                            }
-                        }
-                    }
-                }
-
-                mapView = map
-                mapPosition = Pair(lat, lng)
-                mapReady = false
-
-                location.addView(
-                    map,
-                    LinearLayout.LayoutParams(-1, Ui.dp(this, 230))
-                )
-
-                location.addView(Ui.note(this, "Map © OpenStreetMap"))
-
-                mapOpenButton = Button(this).apply {
-                    text = "Open in Maps"
-                    isAllCaps = false
-                }.also {
-                    location.addView(it)
-                }
-
-                mapCard = location
-                mapDriverId = id
-
-                val html = """
-                    <!DOCTYPE html>
-                    <html>
-                    <head>
-                        <meta name="viewport"
-                              content="width=device-width, initial-scale=1">
-                        <link rel="stylesheet"
-                              href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
-                        <style>
-                            html, body, #map {
-                                width: 100%;
-                                height: 100%;
-                                margin: 0;
-                                padding: 0;
-                                background: #e8ebeb;
-                            }
-                        </style>
-                    </head>
-                    <body>
-                        <div id="map"></div>
-                        <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-                        <script>
-                            const map = L.map('map').setView([$lat, $lng], 15);
-
-                            L.tileLayer(
-                                'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
-                                {
-                                    maxZoom: 19,
-                                    attribution:
-                                        '&copy; OpenStreetMap contributors'
-                                }
-                            ).addTo(map);
-
-                            const marker = L.marker([$lat, $lng]).addTo(map);
-
-                            window.moveDriver = function(lat, lng) {
-                                marker.setLatLng([lat, lng]);
-                                map.panTo([lat, lng], {
-                                    animate: false
-                                });
-                            };
-                        </script>
-                    </body>
-                    </html>
-                """.trimIndent()
-
-                map.loadDataWithBaseURL(
-                    "https://www.openstreetmap.org/",
-                    html, "text/html", "UTF-8", null
-                )
-            } else {
-                mapLocationLabel?.text = locationText
-                mapCoordinatesLabel?.text = coordinatesText
-
-                if (mapPosition != Pair(lat, lng)) {
-                    mapPosition = Pair(lat, lng)
-
-                    if (mapReady) {
-                        mapView?.evaluateJavascript(
-                            "window.moveDriver && window.moveDriver($lat,$lng);",
-                            null
-                        )
-                    }
-                }
+            val label = when (d.locationSource) {
+                "manual" -> "manual test location"; "phone" -> "phone GPS"; else -> "sensor-board GPS"
             }
-
-            mapOpenButton?.setOnClickListener {
-                val uri = Uri.parse(String.format(
-                    Locale.US,
-                    "geo:%.6f,%.6f?q=%.6f,%.6f(%s)",
-                    lat, lng, lat, lng, Uri.encode(d.name)
-                ))
-                try {
-                    startActivity(Intent(Intent.ACTION_VIEW, uri))
-                } catch (_: Exception) {
-                    cloud.toast("No maps app installed")
+            location.addView(Ui.note(this, if (age > 60_000L) "Last known position ($label) · ${age / 60_000} min old"
+                else "Live position ($label), updated every 2 s"))
+            // CPECAPS: one live map, reused while the page refreshes; a new driver starts a new trail.
+            val map = liveMap ?: LiveMap(this).also { liveMap = it }
+            if (liveMapDriver != d.id) { map.clearTrail(); liveMapDriver = d.id }
+            (map.view.parent as? ViewGroup)?.removeView(map.view)
+            map.update(lat, lng, d.speedKph, "${d.name} · ${if (state == "OFFLINE") "offline" else state}",
+                if (state in setOf("HIGH", "MEDIUM", "LOW")) state else "NORMAL")
+            location.addView(map.view, LinearLayout.LayoutParams(-1, Ui.dp(this, 320)))
+            location.addView(Button(this).apply {
+                text = "Open in Maps"
+                isAllCaps = false
+                setOnClickListener {
+                    val uri = Uri.parse(String.format(Locale.US, "geo:%.6f,%.6f?q=%.6f,%.6f(%s)", lat, lng, lat, lng, Uri.encode(d.name)))
+                    try { startActivity(Intent(Intent.ACTION_VIEW, uri)) } catch (_: Exception) { cloud.toast("No maps app installed") }
                 }
-            }
+            })
         }
-
-        if (location.parent !== content) {
-            content.addView(location, Ui.blockParams(this))
-        }
+        content.addView(location, Ui.blockParams(this))
 
         val sessionsCard = Ui.card(this)
         sessionsCard.addView(Ui.title(this, "Recent sessions"))
@@ -742,7 +580,7 @@ class SupervisorActivity : Activity() {
             val detail = if (sn.active) "In progress" else
                 "${sn.durationS / 60} min ${sn.durationS % 60} s · ${sn.alerts} alerts" + if (sn.highAlerts > 0) " (${sn.highAlerts} HIGH)" else ""
             val level = if (sn.active) "LIVE" else sn.maxLevel.ifBlank { "NORMAL" }
-            sessionsCard.addView(Ui.alert(this, timeText(sn.startedMs), detail, level,
+            sessionsCard.addView(Sui.alertItem(this, timeText(sn.startedMs), detail, "", if (sn.active) "LIVE" else level,
                 if (sn.active) Ui.blue else Ui.riskColor(level)))
         }
         content.addView(sessionsCard, Ui.blockParams(this))
@@ -758,7 +596,7 @@ class SupervisorActivity : Activity() {
         else {
             alerts.addView(Ui.eyebrow(this, "RECENT"))
             d.alerts.take(15).forEach { a ->
-                alerts.addView(Ui.alert(this, Ui.alertCause(a.name, a.simulated), timeText(a.ms), Ui.riskLevel(a.level), Ui.riskColor(a.level)))
+                alerts.addView(Sui.alertItem(this, Ui.alertCause(a.name, a.simulated), "", timeText(a.ms), Ui.riskLevel(a.level), Ui.riskColor(a.level)))
             }
         }
         content.addView(alerts, Ui.blockParams(this))
@@ -767,13 +605,29 @@ class SupervisorActivity : Activity() {
     private fun showAlerts() {
         val card = Ui.card(this)
         card.addView(Ui.title(this, "Alerts from all drivers"))
+        addSearch(card)
         card.addView(Ui.choiceRow(this, "Show", listOf("all" to "All alerts", "high" to "HIGH only"),
             if (highOnly) "high" else "all") { highOnly = it == "high"; render(scrollTop = true) })
-        val rows = allAlerts().filter { !highOnly || Ui.riskLevel(it.level) == "HIGH" }.take(60)
-        if (rows.isEmpty()) card.addView(Ui.note(this, if (highOnly) "No HIGH alerts yet." else "No alerts yet."))
+        card.addView(Ui.choiceRow(this, "Period", listOf("today" to "Today", "week" to "7 days", "all" to "All"),
+            alertPeriod) { alertPeriod = it; render(scrollTop = true) })
+        val since = when (alertPeriod) { "today" -> startOfToday(); "week" -> startOfToday() - 6 * 86_400_000L; else -> 0L }
+        val filtered = allAlerts().filter {
+            (!highOnly || Ui.riskLevel(it.level) == "HIGH") && it.ms >= since && matches(it.driverName, it.name, Ui.alertCause(it.name, it.simulated))
+        }
+        card.addView(Ui.note(this, "${filtered.size} alert${if (filtered.size == 1) "" else "s"} · " +
+                "${filtered.count { Ui.riskLevel(it.level) == "HIGH" }} HIGH · ${filtered.map { it.driverId }.distinct().size} driver(s)"))
+        val rows = filtered.take(100)
+        if (rows.isEmpty()) card.addView(Ui.note(this, if (searchText.isNotEmpty()) "No alerts match the search." else if (highOnly) "No HIGH alerts in this period." else "No alerts in this period."))
+        var lastDay = ""
         rows.forEach { a ->
-            val r = Ui.alert(this, "${a.driverName}: ${Ui.alertCause(a.name, a.simulated)}", timeText(a.ms),
-                Ui.riskLevel(a.level), Ui.riskColor(a.level))
+            val day = when {
+                a.ms >= startOfToday() -> "Today"
+                a.ms >= startOfToday() - 86_400_000L -> "Yesterday"
+                else -> SimpleDateFormat("EEE, MMM d", Locale.getDefault()).format(Date(a.ms))
+            }
+            if (day != lastDay) { lastDay = day; card.addView(Sui.dayHeader(this, day)) }
+            val r = Sui.alertItem(this, Ui.alertCause(a.name, a.simulated), a.driverName,
+                SimpleDateFormat("h:mm a", Locale.getDefault()).format(Date(a.ms)), Ui.riskLevel(a.level), Ui.riskColor(a.level))
             r.isClickable = true
             r.setOnClickListener { tab = "drivers"; selectedId = a.driverId; render(scrollTop = true) }
             card.addView(r)
@@ -782,6 +636,7 @@ class SupervisorActivity : Activity() {
     }
 
     private fun showSettings() {
+        if (cloud.role == "supervisor") people.addCard(content)
         val account = Ui.card(this)
         account.addView(Ui.title(this, "Account"))
         account.addView(Ui.note(this, if (cloud.signedIn) "Signed in as ${cloud.email}" else "Not signed in"))
@@ -790,9 +645,27 @@ class SupervisorActivity : Activity() {
             text = if (cloud.signedIn) "Sign out" else "Sign in"
             isAllCaps = false
             setOnClickListener {
-                if (cloud.signedIn) { cloud.unregisterSupervisorPush(); detachDrivers(); cloud.signOut() }
-                startActivity(Intent(this@SupervisorActivity, LauncherActivity::class.java))
-                finish()
+                val leave = {
+                    if (cloud.signedIn) { SupervisorAlertService.stop(this@SupervisorActivity); cloud.unregisterSupervisorPush(); detachDrivers(); cloud.signOut() }
+                    startActivity(Intent(this@SupervisorActivity, LauncherActivity::class.java))
+                    finish()
+                }
+                // CPECAPS: confirm before signing out (alerts stop on this phone).
+                if (cloud.signedIn) android.app.AlertDialog.Builder(this@SupervisorActivity)
+                    .setTitle("Sign out?")
+                    .setMessage("You will stop getting HIGH-risk alerts on this phone until you sign in again.")
+                    .setPositiveButton("Sign out") { _, _ -> leave() }
+                    .setNegativeButton("Cancel", null)
+                    .show()
+                else leave()
+            }
+        })
+        if (cloud.signedIn) account.addView(Button(this).apply {
+            text = "Change password"
+            isAllCaps = false
+            setOnClickListener {
+                com.google.firebase.auth.FirebaseAuth.getInstance().sendPasswordResetEmail(cloud.email)
+                    .addOnCompleteListener { t -> cloud.toast(if (t.isSuccessful) "Password reset link sent to ${cloud.email}" else "Could not send the link: ${t.exception?.message}") }
             }
         })
         content.addView(account, Ui.blockParams(this))
@@ -806,12 +679,31 @@ class SupervisorActivity : Activity() {
                 if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED)
                     requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 77)
                 cloud.registerSupervisorPush()
-            } else cloud.unregisterSupervisorPush()
+                SupervisorAlertService.start(this)
+            } else { cloud.unregisterSupervisorPush(); SupervisorAlertService.stop(this) }
+        })
+        // CPECAPS: background watcher, alarm sound and a test notification.
+        notifications.addView(Ui.switchRow(this, "Keep watching in the background",
+            "Alerts arrive even when this app is closed (shows a small \"Watching your drivers\" notification)",
+            SupervisorAlertService.enabled(this)) { on ->
+            prefs.edit().putBoolean("background_alerts", on).apply()
+            if (on && pushEnabled()) SupervisorAlertService.start(this) else SupervisorAlertService.stop(this)
+        })
+        notifications.addView(Ui.switchRow(this, "Alarm sound", "Play the alarm sound for HIGH-risk alerts (off: vibration only)",
+            SupervisorNotifier.soundOn(this)) { on -> prefs.edit().putBoolean("alert_sound", on).apply() })
+        notifications.addView(Button(this).apply {
+            text = "Send a test notification"
+            isAllCaps = false
+            setOnClickListener {
+                SupervisorNotifier.show(this@SupervisorActivity, "", "TEST high-risk alert",
+                    "This is how a HIGH-risk alert looks. Tap it to open the dashboard.", test = true)
+                if (!pushEnabled()) cloud.toast("Turn on HIGH-risk alerts first")
+            }
         })
         val allowed = Build.VERSION.SDK_INT < 33 ||
                 checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
         if (!allowed) {
-            notifications.addView(Ui.note(this, "Android notifications are blocked for ESCA-3-2526-C3."))
+            notifications.addView(Ui.note(this, "Android notifications are blocked for Danteye."))
             notifications.addView(Button(this).apply {
                 text = "Allow notifications"
                 isAllCaps = false
@@ -839,7 +731,7 @@ class SupervisorActivity : Activity() {
             "MEDIUM" to "Clear warning signs; the driver's buzzer beeps.",
             "LOW" to "Mild signs.",
             "NORMAL" to "Monitoring, no warning signs.",
-            "CALIBRATING" to "First 5 seconds of a session.",
+            "CALIBRATING" to "Learning the driver's normal face (once per driver).",
             "NO CAMERA" to "The driver's app runs but gets no camera picture.",
             "NOT MONITORING" to "The driver stopped monitoring.",
             "OFFLINE" to "No update for 90 seconds (no signal, phone off or app closed).")) {
@@ -850,7 +742,7 @@ class SupervisorActivity : Activity() {
         val about = Ui.card(this)
         about.addView(Ui.title(this, "About"))
         val version = try { packageManager.getPackageInfo(packageName, 0).versionName } catch (_: Exception) { "" }
-        about.addView(Ui.pair(this, "ESCA-3-2526-C3", "version $version"))
+        about.addView(Ui.pair(this, "Danteye", "version $version"))
         content.addView(about, Ui.blockParams(this))
     }
 }

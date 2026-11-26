@@ -18,14 +18,25 @@ import android.widget.ProgressBar
 import android.widget.ScrollView
 import android.widget.SeekBar
 import android.widget.TextView
+import edu.dlsu.esca_3_2526_c3.dms.CALIBRATED
+import edu.dlsu.esca_3_2526_c3.dms.CALIBRATING
+import edu.dlsu.esca_3_2526_c3.dms.DriverCalibrator
 import edu.dlsu.esca_3_2526_c3.monitor.ModelFiles
+import edu.dlsu.esca_3_2526_c3.dms.AutoZoom
+import edu.dlsu.esca_3_2526_c3.dms.CameraWindow
+import edu.dlsu.esca_3_2526_c3.dms.ZoomCommand
+import edu.dlsu.esca_3_2526_c3.monitor.CameraControl
+import edu.dlsu.esca_3_2526_c3.monitor.DeviceSettings
+import edu.dlsu.esca_3_2526_c3.monitor.WifiNet
+import org.json.JSONObject
 
 /**
  * Setup guide (first start, and later from Settings): how the app works and what the screen means,
  * notifications, DMS-NET Wi-Fi, device tests, camera position, done.
  * The camera-position step runs the same MediaPipe face model as monitoring and gives the
- * advice of scripts/aim_camera.py. Calibration to the driver itself happens automatically
- * during the first 5 seconds of every monitoring session.
+ * advice of scripts/aim_camera.py, and its 5-second check calibrates the driver (normal eyes, mouth and head
+ * position) and saves it (CalibrationStore), so trips start without waiting. Settings > Calibration >
+ * Recalibrate opens this step again (intent extra "step" = 4).
  */
 class SetupActivity : Activity() {
     private val prefs by lazy { getSharedPreferences("driver_setup_v1", Context.MODE_PRIVATE) }
@@ -46,6 +57,9 @@ class SetupActivity : Activity() {
     private var progress: ProgressBar? = null
     private var countdown: TextView? = null
     private var feedback: TextView? = null
+    private var cal: DriverCalibrator? = null
+    private var waitUntil = 0L
+    @Volatile private var setupZoom: ZoomCommand? = null
 
     private val timer = object : Runnable {
         override fun run() {
@@ -60,28 +74,50 @@ class SetupActivity : Activity() {
 
             if (remaining > 0L) handler.postDelayed(this, 100L)
             else {
+                val c = cal
+                val done = c == null || synchronized(c) { c.status != CALIBRATING || c.lastFailure.isNotEmpty() }
+                if (!done && SystemClock.elapsedRealtime() < waitUntil) { handler.postDelayed(this, 200L); return }
                 runningCheck = false
+                devices.fast = false
+                devices.onFace = null
                 val state = devices.state
-                calibrated = state.camera && state.faceFound && state.aim?.ok == true
-                if (calibrated) prefs.edit().putLong("aligned_at", System.currentTimeMillis()).apply()
+                val ok = c != null && synchronized(c) { c.status == CALIBRATED }
+                val angleOk = c != null && c.warning.isEmpty()
+                calibrated = ok && angleOk
+                if (calibrated && c != null) {
+                    CalibrationStore.save(this@SetupActivity, c.baseline.copy(), "setup", calibrationExtra())
+                    prefs.edit().putLong("aligned_at", System.currentTimeMillis()).apply()
+                }
                 feedback?.text = when {
-                    calibrated -> "Camera position is good. The app calibrates to the driver automatically " +
-                            "in the first 5 seconds of every monitoring session."
-                    !state.camera || !state.faceFound -> "The camera or face was lost. Adjust the camera and try again."
-                    else -> "The camera is too far to the side. Follow the advice above and try again."
+                    calibrated -> "Done: your calibration is saved, so trips start right away. " +
+                            "To redo it later: Settings > Calibration > Recalibrate."
+                    ok && !angleOk -> "The camera is too far to the side. Follow the advice above and try again."
+                    !state.camera -> "The camera picture was lost. Check the camera and try again."
+                    c != null && c.lastFailure.isNotEmpty() -> plainFailure(c.lastFailure)
+                    else -> "The camera did not see your face clearly enough. Check the light and the camera position, then try again."
                 }
                 startCheck?.isEnabled = state.faceFound
-                startCheck?.text = "Repeat 5-second check"
+                startCheck?.text = "Calibrate again"
                 nextButton?.isEnabled = calibrated
             }
         }
     }
 
+    /** The calibrator's reason in plain words. */
+    private fun plainFailure(reason: String): String = when {
+        "head not steady" in reason -> "Keep your head still and look at the road for the whole 5 seconds, then try again."
+        "eyes not open" in reason -> "Keep your eyes open normally (not squinting), then try again."
+        "mouth" in reason -> "Keep your mouth relaxed and closed, then try again."
+        "eyeBlink" in reason -> "Try not to blink much during the 5 seconds, then try again."
+        "usable frames" in reason -> "The camera did not see your face clearly enough. Check the light and the camera position, then try again."
+        else -> "Calibration did not work. Look at the road normally and try again."
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         Ui.nightMode = Ui.nightPreference(this)
-        step = savedInstanceState?.getInt("step") ?: 0
-        calibrated = prefs.getLong("aligned_at", 0L) > 0L
+        step = savedInstanceState?.getInt("step") ?: intent.getIntExtra("step", 0)
+        calibrated = CalibrationStore.load(this) != null
         val scroll = ScrollView(this).apply { setBackgroundColor(Ui.canvas); isFillViewport = true } // dark in night mode too
         content = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -107,6 +143,8 @@ class SetupActivity : Activity() {
     override fun onPause() {
         handler.removeCallbacks(timer)
         runningCheck = false
+        devices.fast = false
+        devices.onFace = null
         devices.stop()
         super.onPause()
     }
@@ -218,8 +256,20 @@ class SetupActivity : Activity() {
         if (!granted) card.addView(button("Allow notifications") {
             requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 90)
         })
-        card.addView(button("Continue to Wi-Fi") { goTo(2) })
         content.addView(card, Ui.blockParams(this))
+
+        // CPECAPS: monitoring must keep running when Danteye is not on the screen.
+        val bg = Ui.card(this)
+        bg.addView(Ui.title(this, "Keep running in the background"))
+        val unrestricted = BackgroundHelp.isUnrestricted(this)
+        bg.addView(Ui.note(this, "While you drive, Danteye works with the screen off or with another app (e.g. maps) in front. " +
+                "Battery saving would pause it, so allow it to run in the background."))
+        bg.addView(Ui.deviceIndicator(this, "Runs in the background", unrestricted, onText = "Allowed", offText = "Not allowed yet"))
+        if (!unrestricted) bg.addView(button("Allow running in the background") { BackgroundHelp.askUnrestricted(this) })
+        bg.addView(Ui.note(this, BackgroundHelp.backgroundSteps()))
+        bg.addView(button("Open Danteye's app settings") { BackgroundHelp.openAppSettings(this) })
+        bg.addView(button("Continue to Wi-Fi") { goTo(2) })
+        content.addView(bg, Ui.blockParams(this))
     }
 
     private fun showWifi() {
@@ -231,8 +281,17 @@ class SetupActivity : Activity() {
                 "Return here afterward."))
         card.addView(Ui.note(this, "The app cannot verify the Wi-Fi network name without additional location permission."))
         card.addView(button("Open Wi-Fi settings") { startActivity(Intent(Settings.ACTION_WIFI_SETTINGS)) })
-        card.addView(button("I have joined DMS-NET") { goTo(3) })
         content.addView(card, Ui.blockParams(this))
+
+        // CPECAPS: the boards are on DMS-NET (no internet); the supervisor link needs mobile data at the same time.
+        val data = Ui.card(this)
+        data.addView(Ui.title(this, "Use Wi-Fi and mobile data at the same time"))
+        data.addView(Ui.note(this, "Danteye talks to the camera and the sensor board over DMS-NET, and to your supervisor " +
+                "over mobile data. Allow Danteye to use both:"))
+        data.addView(Ui.note(this, BackgroundHelp.dataSteps()))
+        data.addView(button("Open data usage settings") { BackgroundHelp.openDataUsage(this) })
+        data.addView(button("I have joined DMS-NET") { goTo(3) })
+        content.addView(data, Ui.blockParams(this))
     }
 
     private fun showDevices() {
@@ -252,9 +311,10 @@ class SetupActivity : Activity() {
 
     private fun showCalibration() {
         val card = Ui.card(this)
-        card.addView(Ui.title(this, "Camera position"))
-        card.addView(Ui.note(this, "Sit normally and look straight at the road for 5 seconds. Keep your face fully visible. " +
-                "The camera should be within ${"%.0f".format(ModelLimits.cameraOffsetDeg(this))}° of straight ahead."))
+        card.addView(Ui.title(this, "Camera position and calibration"))
+        card.addView(Ui.note(this, "Sit in your driving position and look at the road for 5 seconds with a relaxed face. " +
+                "The app learns your normal face and saves it, so your trips start right away. " +
+                "The camera can be up to ${"%.0f".format(ModelLimits.cameraOffsetDeg(this))}° to the side."))
         preview = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         card.addView(preview)
         offsetLabel = Ui.note(this, "Waiting for a camera picture…")
@@ -263,16 +323,16 @@ class SetupActivity : Activity() {
             alignment = true
             render()
         })
-        countdown = Ui.note(this, "Ready for a 5-second position check")
+        countdown = Ui.note(this, CalibrationStore.describe(this) ?: "Not calibrated yet")
         card.addView(countdown)
         progress = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
             max = 5000
             progress = 0
         }
         card.addView(progress, LinearLayout.LayoutParams(-1, Ui.dp(this, 20)))
-        feedback = Ui.note(this, if (calibrated) "Position check previously completed." else "A visible face is required to start.")
+        feedback = Ui.note(this, if (calibrated) "You can calibrate again if you changed the camera or the driver." else "Your face must be visible to start.")
         card.addView(feedback)
-        startCheck = button("Start 5-second check") { startCalibration() }
+        startCheck = button(if (calibrated) "Calibrate again" else "Start 5-second calibration") { startCalibration() }
         card.addView(startCheck)
         nextButton = button("Continue to Done") { goTo(5) }.apply { isEnabled = calibrated }
         card.addView(nextButton)
@@ -303,20 +363,82 @@ class SetupActivity : Activity() {
     private fun startCalibration() {
         if (runningCheck || !devices.state.camera || !devices.state.faceFound) return
         calibrated = false
-        prefs.edit().remove("aligned_at").apply()
-        runningCheck = true
-        checkEnds = SystemClock.elapsedRealtime() + 5000L
         startCheck?.isEnabled = false
         nextButton?.isEnabled = false
-        feedback?.text = "Keep looking straight ahead while the timer runs."
+        if (DeviceSettings(this).autoZoom) startFraming() else { setupZoom = null; beginCalibrationWindow() }
+    }
+
+    /** CPECAPS: before calibrating, zoom the camera to the face (the same view is used on every trip). */
+    private fun startFraming() {
+        runningCheck = true
+        countdown?.text = "Framing the camera on your face…"
+        feedback?.text = "Look at the road normally."
+        val settings = DeviceSettings(this)
+        Thread {
+            val wifi = WifiNet(this).apply { start() }
+            var waited = 0
+            while (wifi.network == null && waited < 2000) { Thread.sleep(100); waited += 100 }
+            val cam = CameraControl(wifi, settings.cameraUrl)
+            var window: CameraWindow? = null
+            try {
+                var info = cam.status()
+                if (info.has("window") && info.optString("sensor") == "OV2640") {
+                    if (info.optInt("lens", -1) != settings.lensFov || info.optInt("fov", -1) != settings.targetFov)
+                        info = cam.setView(settings.lensFov, settings.targetFov)
+                    if (info.optDouble("zoom", 1.0) > 1.001) info = cam.resetZoom()
+                    window = CameraControl.window(info)
+                }
+            } catch (_: Exception) { }
+            var zoom = ZoomCommand(1.0, 0.5, 0.5)
+            if (window != null) {
+                Thread.sleep(800) // the new view arrives
+                val az = AutoZoom(samplesNeeded = 5)
+                val latch = java.util.concurrent.CountDownLatch(1)
+                devices.onFace = { _, obs, frame -> synchronized(az) { if (az.add(obs.bbox, frame.width, frame.height)) latch.countDown() } }
+                devices.fast = true
+                latch.await(6, java.util.concurrent.TimeUnit.SECONDS)
+                devices.onFace = null
+                val cmd = synchronized(az) { if (az.ready) az.command(window) else null }
+                if (cmd != null) try {
+                    if (cam.setZoom(cmd).optBoolean("ok", false)) zoom = cmd
+                    Thread.sleep(900)
+                } catch (_: Exception) { }
+            }
+            wifi.stop()
+            setupZoom = zoom
+            runOnUiThread { if (!isFinishing && runningCheck) beginCalibrationWindow() }
+        }.start()
+    }
+
+    /** The 5-second calibration: every face picture goes into a calibrator, as during a trip. */
+    private fun beginCalibrationWindow() {
+        val cfg = ModelFiles.config(this)
+        val c = DriverCalibrator(cfg.calibration, cfg.thresholds)
+        cal = c
+        devices.onFace = { f, _, _ -> synchronized(c) { c.collect(f) } }
+        devices.fast = true
+        runningCheck = true
+        checkEnds = SystemClock.elapsedRealtime() + 5000L
+        waitUntil = checkEnds + 3000L
+        feedback?.text = "Keep looking at the road normally while the timer runs."
         timer.run()
+    }
+
+    /** The camera view used while calibrating (MonitorSession uses the calibration only with the same view). */
+    private fun calibrationExtra(): JSONObject {
+        val s = DeviceSettings(this)
+        val z = setupZoom ?: ZoomCommand(1.0, 0.5, 0.5)
+        return JSONObject().put("lens_fov", s.lensFov).put("target_fov", s.targetFov).put("camera_res", s.cameraResolution)
+            .put("zoom", z.zoom).put("cx", z.cx).put("cy", z.cy)
     }
 
     private fun showDone() {
         val card = Ui.card(this)
         card.addView(Ui.title(this, "Setup done"))
-        card.addView(Ui.note(this, "Camera position checked. Press Start monitoring on the Home screen; " +
-                "look at the road normally for the first 5 seconds while the app calibrates to you."))
+        card.addView(Ui.note(this, if (CalibrationStore.load(this) != null)
+            "You are calibrated. Press Start monitoring on the Home screen: no waiting."
+            else "Press Start monitoring on the Home screen and look at the road for the first 5 seconds: " +
+                "the app calibrates to you once and remembers it."))
         card.addView(button("Finish setup") {
             prefs.edit().putBoolean("complete", true).apply()
             finish()

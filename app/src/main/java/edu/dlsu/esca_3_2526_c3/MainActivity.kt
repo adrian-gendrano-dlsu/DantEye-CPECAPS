@@ -61,6 +61,7 @@ class MainActivity : Activity() {
     private var onAccount = false
     private var onSettings = false
     private var selectedHistorySession: String? = null
+    private var historyFilter = "all"   // CPECAPS: all | today | week | high
     private var developerMode = false
     // No default test coordinates. A manual location lasts only for this activity/session.
     private var manualCoordinates: Pair<Double, Double>? = null
@@ -78,6 +79,7 @@ class MainActivity : Activity() {
     private lateinit var scroller: ScrollView
     private lateinit var homeTab: TextView
     private lateinit var historyTab: TextView
+    private lateinit var accountTab: TextView
     private lateinit var settingsTab: TextView
     private var statusStrip: LinearLayout? = null
     private var cameraFrame: LinearLayout? = null
@@ -94,10 +96,14 @@ class MainActivity : Activity() {
     private var liveImage: ImageView? = null
     private var calibrationBar: android.widget.ProgressBar? = null
     private var tripLine: TextView? = null
+    private var speedLine: TextView? = null   // CPECAPS: speed and what it does to the risk
+    private var homeMap: LiveMap? = null      // CPECAPS: live mini map on Home
+    private var netBanner: NetBanner? = null  // CPECAPS: "No internet" strip
     private var shownState = ""
     private val behaviourValues = mutableMapOf<String, TextView>()
     private val rawValues = mutableMapOf<String, TextView>()
     private var lastFrameUi = 0L
+    private var pageKey = "" // which page is shown (a rebuild of the same page keeps the scroll place)
 
     /** Set up UI and reconnect to an existing monitoring session. */
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -116,6 +122,7 @@ class MainActivity : Activity() {
             setOnClickListener { onDashboardTap() }
         }
         root.addView(header)
+        netBanner = NetBanner(this, root, root.childCount, "No internet · alerts are kept on this phone and sent when it is back")
         scroller = ScrollView(this).apply {
             isFillViewport = true
             addView(LinearLayout(this@MainActivity).apply {
@@ -144,6 +151,7 @@ class MainActivity : Activity() {
 
         homeTab = Ui.tab(this, "⌂  Home") { showHome() }.apply { textSize = 13f }
         historyTab = Ui.tab(this, "◷  History") { showHistory() }.apply { textSize = 13f }
+        accountTab = Ui.tab(this, "Account") { showAccount() }.apply { textSize = 13f }
         settingsTab = Ui.tab(this, "⚙  Settings") { showSettings() }.apply { textSize = 13f }
 
         tabs.addView(homeTab, LinearLayout.LayoutParams(0, Ui.dp(this, 48), 1f))
@@ -191,10 +199,29 @@ class MainActivity : Activity() {
 
     /** Existing sessions may change Firebase roles while this activity is visible. */
     private fun refreshForRole() {
+        if (cloud.roleChecked && cloud.signedIn && cloud.role.isEmpty()) { accessRemoved(); return }
         if (cloud.role == "supervisor") {
             startActivity(Intent(this, SupervisorActivity::class.java))
             finish()
         } else updateVisiblePage()
+    }
+
+    /** A supervisor removed this account's access (checked once online): tell the user, stop, sign out. */
+    private var removedShown = false
+    private fun accessRemoved() {
+        if (removedShown || isFinishing) return
+        removedShown = true
+        if (DriverMonitoringService.active)
+            startService(Intent(this, DriverMonitoringService::class.java).setAction(DriverMonitoringService.STOP))
+        android.app.AlertDialog.Builder(this)
+            .setTitle("Access removed")
+            .setMessage("A supervisor removed your access to Danteye. Ask your supervisor if this is a mistake.")
+            .setCancelable(false)
+            .setPositiveButton("OK") { _, _ ->
+                cloud.signOut()
+                startActivity(Intent(this, LauncherActivity::class.java))
+                finish()
+            }.show()
     }
 
     /** Refresh the page currently selected by the driver. */
@@ -216,7 +243,7 @@ class MainActivity : Activity() {
         }
         DriverMonitoringService.onFrame = { frame -> if (!isFinishing && !isDestroyed) onLiveFrame(frame) }
         DriverMonitoringService.onStatusText = { text ->
-            statusLine?.text = text
+            statusLine?.text = friendlyStatus(text)
             if (!isFinishing && !isDestroyed && onHome && !onAccount && driverState() != shownState) updateVisiblePage()
         }
 
@@ -243,6 +270,10 @@ class MainActivity : Activity() {
     /** Clean up the border animation and Firebase listeners. */
     override fun onDestroy() {
         borderPulse?.cancel()
+        (homeMap?.view?.parent as? android.view.ViewGroup)?.removeView(homeMap?.view)
+        homeMap?.destroy()
+        homeMap = null
+        netBanner?.close()
         cloud.stop()
         super.onDestroy()
     }
@@ -286,6 +317,10 @@ class MainActivity : Activity() {
             checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 79)
         }
+        // CPECAPS: the phone's GPS gives speed and live location when the sensor board has no fix.
+        if (!running && checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION), 81)
+        }
         val intent = Intent(this, DriverMonitoringService::class.java)
             .setAction(if (running) DriverMonitoringService.STOP else DriverMonitoringService.START)
         if (running && manualCoordinates != null) {
@@ -294,11 +329,28 @@ class MainActivity : Activity() {
             cloud.clearLocation()
         }
         if (running) startService(intent) else ContextCompat.startForegroundService(this, intent)
+        // CPECAPS: monitoring must keep running when the app is in the background (asked once; Settings has it too).
+        if (!running) BackgroundHelp.askOnceAtStart(this)
     }
 
+    /** Settings > Calibration > Recalibrate: now (during a trip) or in the setup guide's camera step. */
     private fun recalibrate() {
-        startService(Intent(this, DriverMonitoringService::class.java).setAction(DriverMonitoringService.RECALIBRATE))
-        cloud.toast("Recalibrating: look at the road normally for 5 seconds")
+        if (DriverMonitoringService.active) {
+            startService(Intent(this, DriverMonitoringService::class.java).setAction(DriverMonitoringService.RECALIBRATE))
+            cloud.toast("Recalibrating: look at the road normally for 5 seconds")
+            showHome()
+        } else startActivity(Intent(this, SetupActivity::class.java).putExtra("step", 4))
+    }
+
+    /** Pipeline messages in plain words for the driver (developer mode shows them as they are). */
+    private fun friendlyStatus(text: String): String = if (developerMode) text else when {
+        text.startsWith("Camera:") -> "Reconnecting to the camera…"
+        text.startsWith("Connecting to the camera") -> "Connecting to the camera…"
+        text.startsWith("sensors:") -> "The sensor board is not answering (GPS and buzzer)"
+        text.startsWith("Face model failed") -> "The face model did not load: reinstall the app"
+        text.startsWith("YOLO model") || text.startsWith("Eye-state model") || text.startsWith("Fusion model") ||
+            text.startsWith("Log not saved") -> ""
+        else -> text
     }
 
     /** Seven header taps - toggle developer mode (settings and test controls). */
@@ -390,9 +442,21 @@ class MainActivity : Activity() {
         val minutes = (System.currentTimeMillis() - sessionStarted).coerceAtLeast(0L) / 60_000L
         val alerts = recent.count { it.third != "OFF" }
         val speed = DriverMonitoringService.latest?.out?.context?.speedKmh
-            ?.takeIf { DriverMonitoringService.latest?.out?.context?.speedSource == "gps" }
+            ?.takeIf { DriverMonitoringService.latest?.out?.context?.speedSource in setOf("gps", "phone_gps") }
         return "Trip $minutes min · $alerts alert${if (alerts == 1) "" else "s"}" +
                 (speed?.let { String.format(Locale.US, " · %.0f km/h", it) } ?: "")
+    }
+
+    /** CPECAPS: "Speed 92 km/h (phone GPS) · high speed: signs count one level higher". */
+    private fun speedText(c: edu.dlsu.esca_3_2526_c3.dms.ContextReading): String {
+        val kmh = c.speedKmh ?: return "Speed: no GPS yet (counted as normal driving, 40 km/h)"
+        val source = if (c.speedSource == "phone_gps") "phone GPS" else "sensor-board GPS"
+        val effect = when {
+            kmh < 10 -> "stopped or very slow: risk one level lower"
+            kmh >= 80 -> "high speed: any warning sign counts one level higher"
+            else -> "normal driving"
+        }
+        return String.format(Locale.US, "Speed %.0f km/h (%s) · %s", kmh, source, effect)
     }
 
     /** Home, not monitoring: the most recent session, or how to begin. */
@@ -419,23 +483,28 @@ class MainActivity : Activity() {
 
     private fun renderLive(f: LiveFrame?) {
         riskMessage?.text = stateMessage(shownState)
-        statusLine?.text = DriverMonitoringService.statusText
+        statusLine?.text = friendlyStatus(DriverMonitoringService.statusText)
         liveImage?.setImageBitmap(f?.image)
         if (f == null) return
         val out = f.out
         calibrationLine?.text = when {
             out.calibrationStatus == CALIBRATING -> String.format(Locale.US,
-                "Calibrating %.0f%%: look straight at the road with a relaxed face.%s", 100 * f.calibrationProgress,
-                if (f.calibrationProblem.isNotEmpty()) "  Last try: ${f.calibrationProblem}" else "")
-            f.warning.isNotEmpty() -> "⚠ ${f.warning}"
-            else -> "Calibrated to this driver."
+                "Learning your normal face: look at the road (%.0f%%). This is saved, so it happens only once.", 100 * f.calibrationProgress)
+            f.warning.isNotEmpty() -> if (developerMode) "⚠ ${f.warning}" else "⚠ The camera is far to the side: check its position (Settings > Calibration)"
+            else -> ""
         }
+        calibrationLine?.visibility = if (calibrationLine?.text.isNullOrEmpty()) View.GONE else View.VISIBLE
         calibrationLine?.setTextColor(if (f.warning.isNotEmpty()) Ui.red else Ui.muted)
         calibrationBar?.apply {
             visibility = if (out.calibrationStatus == CALIBRATING) View.VISIBLE else View.GONE
             progress = (100 * f.calibrationProgress).toInt().coerceIn(0, 100)
         }
         tripLine?.text = tripText()
+        speedLine?.text = speedText(out.context)
+        out.context.latitude?.let { lat -> out.context.longitude?.let { lng ->
+            homeMap?.update(lat, lng, out.context.speedKmh, if (out.context.locationSource == "phone") "Phone GPS" else "Sensor-board GPS",
+                if (out.activeTier in setOf("LOW", "MEDIUM", "HIGH")) out.activeTier else "NORMAL")
+        } }
         val aim = f.aim
         aimLine?.text = if (aim?.offset == null) "" else String.format(Locale.US,
             "Camera angle %.0f° (limit %.0f°): %s · left/right: %s · up/down: %s", aim.offset, aim.limit,
@@ -487,10 +556,11 @@ class MainActivity : Activity() {
     }
 
     /** Reset page, flashing border */
-    private fun selectTab(home: Boolean, account: Boolean = false, settings: Boolean = false) {
+    private fun selectTab(home: Boolean, account: Boolean = false, settings: Boolean = false, key: String = "") {
         onSettings = settings
         Ui.activeTab(homeTab, home)
         Ui.activeTab(historyTab, !home && !account && !settings)
+        Ui.activeTab(accountTab, account) // Account is opened from Settings (not a tab of its own)
         Ui.activeTab(settingsTab, settings || account)
         borderPulse?.cancel()
         borderPulse = null
@@ -498,7 +568,7 @@ class MainActivity : Activity() {
         statusStrip = null
         cameraFrame = null
         riskDisplay = null; riskMessage = null; statusLine = null; calibrationLine = null; aimLine = null; liveImage = null
-        calibrationBar = null; tripLine = null
+        calibrationBar = null; tripLine = null; speedLine = null
         behaviourValues.clear(); rawValues.clear()
         shownState = driverState()
         window.apply {
@@ -524,8 +594,12 @@ class MainActivity : Activity() {
             }
         }
 
+        // New data or an alert rebuilds the page: keep the place. Another page starts at the top.
+        val keepY = if (key.isNotEmpty() && key == pageKey) scroller.scrollY else 0
+        pageKey = key
+        page.minimumHeight = if (keepY > 0) page.height else 0 // the page does not collapse (no jump to the top)
         page.removeAllViews()
-        scroller.scrollTo(0, 0)
+        if (keepY > 0) scroller.post { scroller.scrollTo(0, keepY); page.minimumHeight = 0 } else scroller.scrollTo(0, 0)
     }
 
     /** Repaint only device indicators and camera snapshots without resetting the page. */
@@ -581,7 +655,7 @@ class MainActivity : Activity() {
     }
 
     private fun addConnectionStrip(target: LinearLayout) {
-        target.addView(Ui.eyebrow(this, "DEVICE CONNECTIONS"))
+        target.addView(Ui.eyebrow(this, "DEVICES"))
         statusStrip = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         target.addView(statusStrip)
         refreshDeviceStatus()
@@ -599,7 +673,7 @@ class MainActivity : Activity() {
         onHome = true
         onDetails = false
         onAccount = false
-        selectTab(true)
+        selectTab(true, key = "home")
         val overview = Ui.card(this)
         overview.addView(Ui.eyebrow(this, "DRIVING MODE"))
 
@@ -638,7 +712,7 @@ class MainActivity : Activity() {
             backgroundTintList = ColorStateList.valueOf(if (DriverMonitoringService.active) Ui.red else Ui.green)
             setOnClickListener { controlSession() }
         })
-        statusLine = Ui.note(this, DriverMonitoringService.statusText)
+        statusLine = Ui.note(this, friendlyStatus(DriverMonitoringService.statusText))
         overview.addView(statusLine)
         if (DriverMonitoringService.active) {
             tripLine = Ui.title(this, tripText()).apply { textSize = 15f }
@@ -651,19 +725,21 @@ class MainActivity : Activity() {
             overview.addView(calibrationBar, LinearLayout.LayoutParams(-1, Ui.dp(this, 14)))
             calibrationLine = Ui.note(this, "")
             overview.addView(calibrationLine)
-            aimLine = Ui.note(this, "")
-            overview.addView(aimLine)
+            if (developerMode) { aimLine = Ui.note(this, ""); overview.addView(aimLine) }
+            speedLine = Ui.title(this, "Speed: waiting for GPS…").apply { textSize = 14f }
+            overview.addView(speedLine)
+            // CPECAPS: live mini map (sensor-board GPS, or the phone's GPS when the board has no fix).
+            val map = homeMap ?: LiveMap(this).also { homeMap = it }
+            (map.view.parent as? android.view.ViewGroup)?.removeView(map.view)
+            overview.addView(map.view, LinearLayout.LayoutParams(-1, Ui.dp(this, 220)))
         }
         overview.addView(Ui.space(this, 8))
         addConnectionStrip(overview)
-        overview.addView(Ui.note(this, if (cloud.signedIn)
-            "Signed in as ${cloud.email}" else "Not signed in · Open Settings to sign in"))
+        if (!cloud.signedIn) overview.addView(Ui.note(this, "Not signed in: your supervisor cannot see your trips (Settings > Account)"))
 
         // Side-by-side shortcuts avoid another row of full-width buttons.
         val shortcuts = LinearLayout(this)
         shortcuts.addView(navyButton("View details") { showDetails() },
-            LinearLayout.LayoutParams(0, Ui.dp(this, 48), 1f))
-        if (DriverMonitoringService.active) shortcuts.addView(navyButton("Recalibrate") { recalibrate() },
             LinearLayout.LayoutParams(0, Ui.dp(this, 48), 1f))
         overview.addView(shortcuts)
         page.addView(overview, Ui.blockParams(this))
@@ -739,7 +815,7 @@ class MainActivity : Activity() {
         onHome = true
         onDetails = true
         onAccount = false
-        selectTab(true)
+        selectTab(true, key = "details")
         val metrics = Ui.card(this)
         metrics.addView(Ui.title(this, "Detection Details"))
         addConnectionStrip(metrics)
@@ -751,7 +827,7 @@ class MainActivity : Activity() {
                 contentDescription = "Live camera picture with the detected face points"
             }
             metrics.addView(liveImage, LinearLayout.LayoutParams(-1, Ui.dp(this, 220)))
-            statusLine = Ui.note(this, DriverMonitoringService.statusText)
+            statusLine = Ui.note(this, friendlyStatus(DriverMonitoringService.statusText))
             metrics.addView(statusLine)
         } else {
             cameraFrame = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
@@ -806,12 +882,12 @@ class MainActivity : Activity() {
         onHome = false
         onAccount = false
         selectedHistorySession = null
-        selectTab(false)
+        selectTab(false, key = "history")
         val history = Ui.card(this)
         history.addView(Ui.title(this, "Session History"))
         val waiting = cloud.pendingCount
         history.addView(Ui.note(this, if (waiting == 0) "✓ Everything is synced with the supervisor."
-        else "⟳ $waiting item${if (waiting == 1) "" else "s"} waiting to be sent to the supervisor. ${cloud.connectionLabel}.").apply {
+            else "⟳ $waiting item${if (waiting == 1) "" else "s"} waiting to be sent to the supervisor. ${cloud.connectionLabel}.").apply {
             setTextColor(if (waiting == 0) Ui.green else Ui.amber)
         })
         if (waiting > 0) history.addView(Button(this).apply {
@@ -822,9 +898,30 @@ class MainActivity : Activity() {
                 else { cloud.flush(); cloud.toast("Sending…") }
             }
         })
-        val sessions = SessionHistoryStore.list(this)
+        val allSessions = SessionHistoryStore.list(this)
+        // CPECAPS: filter the list and summarise what is shown.
+        val dayStart = java.util.Calendar.getInstance().apply {
+            set(java.util.Calendar.HOUR_OF_DAY, 0); set(java.util.Calendar.MINUTE, 0); set(java.util.Calendar.SECOND, 0); set(java.util.Calendar.MILLISECOND, 0)
+        }.timeInMillis
+        val sessions = allSessions.filter { sn ->
+            when (historyFilter) {
+                "today" -> sn.startedMs >= dayStart
+                "week" -> sn.startedMs >= dayStart - 6 * 86_400_000L
+                "high" -> sn.alerts.any { Ui.riskLevel(it.severity) == "HIGH" }
+                else -> true
+            }
+        }
+        if (allSessions.isNotEmpty()) {
+            history.addView(Ui.choiceRow(this, "Show", listOf("all" to "All", "today" to "Today", "week" to "7 days", "high" to "With HIGH"),
+                historyFilter) { historyFilter = it; showHistory() })
+            val minutes = sessions.sumOf { it.durationMs() } / 60_000L
+            history.addView(Ui.note(this, "${sessions.size} session${if (sessions.size == 1) "" else "s"} · " +
+                    "${minutes / 60} h ${minutes % 60} min driving · ${sessions.sumOf { it.alerts.size }} alerts " +
+                    "(${sessions.sumOf { sn -> sn.alerts.count { Ui.riskLevel(it.severity) == "HIGH" } }} HIGH)"))
+        }
 
-        if (sessions.isEmpty()) history.addView(Ui.note(this, "No saved sessions yet. Start monitoring to record a session."))
+        if (allSessions.isEmpty()) history.addView(Ui.note(this, "No saved sessions yet. Start monitoring to record a session."))
+        else if (sessions.isEmpty()) history.addView(Ui.note(this, "No sessions match this filter."))
         else sessions.forEach { session ->
             val row = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
@@ -850,7 +947,7 @@ class MainActivity : Activity() {
                 session.alerts.isEmpty() -> Ui.muted
                 else -> Ui.amber
             }))
-            row.addView(ImageButton(this).apply {
+            if (developerMode) row.addView(ImageButton(this).apply {
                 setImageResource(android.R.drawable.ic_menu_share)
                 imageTintList = ColorStateList.valueOf(if (nightMode) Color.WHITE else Ui.muted)
                 setBackgroundColor(Color.TRANSPARENT)
@@ -860,6 +957,27 @@ class MainActivity : Activity() {
                 setOnClickListener { shareSession(session) }
             })
             history.addView(row)
+        }
+        // CPECAPS: delete every finished session (with confirmation).
+        if (allSessions.any { !(it.active && DriverMonitoringService.active && DriverMonitoringService.sessionId == it.id) }) {
+            history.addView(Button(this).apply {
+                text = "Delete all finished sessions"
+                isAllCaps = false
+                setTextColor(Ui.red)
+                setOnClickListener {
+                    android.app.AlertDialog.Builder(this@MainActivity)
+                        .setTitle("Delete all sessions?")
+                        .setMessage("This removes every finished session and its log from this phone. " +
+                                "Sessions already synced stay visible to your supervisor.")
+                        .setPositiveButton("Delete") { _, _ ->
+                            SessionHistoryStore.list(this@MainActivity).forEach { SessionHistoryStore.delete(this@MainActivity, it.id) }
+                            cloud.toast("Sessions deleted")
+                            showHistory()
+                        }
+                        .setNegativeButton("Cancel", null)
+                        .show()
+                }
+            })
         }
         page.addView(history, Ui.blockParams(this))
 
@@ -917,7 +1035,7 @@ class MainActivity : Activity() {
         onHome = false
         onAccount = false
         selectedHistorySession = id
-        selectTab(false)
+        selectTab(false, key = "session:$id")
 
         val details = Ui.card(this)
         details.addView(Ui.note(this, "‹ Back to history").apply {
@@ -928,7 +1046,7 @@ class MainActivity : Activity() {
         details.addView(Ui.pair(this, "Driving time", sessionMinutes(session.durationMs())))
         details.addView(Ui.pair(this, "Alerts", session.alerts.size.toString()))
         details.addView(Ui.pair(this, "HIGH alerts", session.alerts.count { Ui.riskLevel(it.severity) == "HIGH" }.toString()))
-        details.addView(Ui.pair(this, "Measurement log", if (session.logDir.isNotBlank() && File(session.logDir).isDirectory)
+        if (developerMode) details.addView(Ui.pair(this, "Measurement log", if (session.logDir.isNotBlank() && File(session.logDir).isDirectory)
             "Saved (share to analyse)" else "Not saved"))
         if (session.syncTracked) {
             details.addView(Ui.eyebrow(this, "SUPERVISOR"))
@@ -1039,6 +1157,7 @@ class MainActivity : Activity() {
     override fun onBackPressed() {
         when {
             selectedHistorySession != null -> showHistory()
+            onAccount -> showSettings()
             onSettings || onDetails || !onHome -> showHome()
             else -> super.onBackPressed()
         }
@@ -1053,34 +1172,59 @@ class MainActivity : Activity() {
         updateVisiblePage()
     }
 
-    /** Settings always includes Account; extra options require developer mode. */
+    /** Settings overview, grouped like Android's settings pattern; each device topic opens its own screen. */
     private fun showSettings() {
         val keepY = if (onSettings) scroller.scrollY else 0 // a choice tapped in Settings keeps the place
         onHome = false
         onDetails = false
         onAccount = false
         selectedHistorySession = null
-        selectTab(false, settings = true)
-        if (!developerMode) {
-            addAccountCard()
-            return
-        }
+        selectTab(false, settings = true, key = "settings")
         val prefs = edu.dlsu.esca_3_2526_c3.monitor.DeviceSettings(this)
 
         val alerts = Ui.card(this)
         alerts.addView(Ui.title(this, "Alerts"))
-        alerts.addView(Ui.note(this, "The buzzer on the sensor board always sounds the alarm. The phone can add:"))
-        alerts.addView(Ui.switchRow(this, "Spoken warnings", "Says what to do, e.g. \"Eyes on the road\" (MEDIUM and HIGH alerts, alarm volume)",
-            prefs.speakAlerts) { prefs.speakAlerts = it })
-        alerts.addView(Ui.switchRow(this, "Vibration", "Vibrates for MEDIUM and HIGH alerts", prefs.vibrateAlerts) { prefs.vibrateAlerts = it })
-        alerts.addView(Ui.switchRow(this, "Phone beeps", "Beeps like the buzzer; useful without the sensor board (from the next session)",
-            prefs.phoneSound) { prefs.phoneSound = it })
+        alerts.addView(Ui.switchRow(this, "Spoken warnings", "Says what to do, e.g. \"Eyes on the road\"", prefs.speakAlerts) { prefs.speakAlerts = it })
+        alerts.addView(Ui.switchRow(this, "Vibration", "For MEDIUM and HIGH alerts", prefs.vibrateAlerts) { prefs.vibrateAlerts = it })
+        alerts.addView(Ui.linkRow(this, "Buzzer volume", "Level ${prefs.buzzerVolume} of 5 (sensor board)") { openDevice("sensor") })
         alerts.addView(Ui.choiceRow(this, "Break reminder", listOf("0" to "Off", "60" to "1 h", "90" to "1.5 h", "120" to "2 h", "180" to "3 h"),
             prefs.breakMinutes.toString()) { prefs.breakMinutes = it.toInt(); showSettings() })
-        alerts.addView(Ui.linkRow(this, "Test phone alert", "Plays a spoken warning and a vibration once") {
+        alerts.addView(Ui.linkRow(this, "Test phone alert", "Plays a spoken warning and a vibration") {
             startService(Intent(this, DriverMonitoringService::class.java).setAction(DriverMonitoringService.TEST_ALERT))
         })
         page.addView(alerts, Ui.blockParams(this))
+
+        val calibration = Ui.card(this)
+        calibration.addView(Ui.title(this, "Calibration"))
+        val saved = CalibrationStore.describe(this)
+        calibration.addView(Ui.deviceIndicator(this, "Your normal face", saved != null, onText = "Calibrated", offText = "Not yet"))
+        calibration.addView(Ui.note(this, saved ?: "You are calibrated once (5 seconds), in the setup guide or on your first trip."))
+        calibration.addView(Ui.linkRow(this, "Recalibrate", if (DriverMonitoringService.active)
+            "Look at the road for 5 seconds now" else "Camera position and a new 5-second calibration") { recalibrate() })
+        page.addView(calibration, Ui.blockParams(this))
+
+        val devicesCard = Ui.card(this)
+        devicesCard.addView(Ui.title(this, "Devices"))
+        addConnectionStrip(devicesCard)
+        devicesCard.addView(Ui.linkRow(this, "Wi-Fi (DMS-NET)", "Join the boards' Wi-Fi, change its password") { openDevice("wifi") })
+        devicesCard.addView(Ui.linkRow(this, "Camera", "${prefs.cameraResolution}, lens, zoom, SD video, tests") { openDevice("camera") })
+        devicesCard.addView(Ui.linkRow(this, "Sensor board & buzzer", "Buzzer volume and type, tests") { openDevice("sensor") })
+        devicesCard.addView(Ui.linkRow(this, "Board addresses", "Find the boards if one does not answer") { openDevice("connection") })
+        page.addView(devicesCard, Ui.blockParams(this))
+
+        // Background running (CPECAPS): battery saving would pause monitoring when the app is not on the screen.
+        val background = Ui.card(this)
+        background.addView(Ui.title(this, "Background running"))
+        val unrestricted = BackgroundHelp.isUnrestricted(this)
+        background.addView(Ui.deviceIndicator(this, "Runs in the background", unrestricted, onText = "Allowed", offText = "Limited"))
+        if (!unrestricted) background.addView(Ui.linkRow(this, "Allow running in the background", "Android asks: Let app always run in background?") {
+            BackgroundHelp.askUnrestricted(this)
+        })
+        background.addView(Ui.note(this, BackgroundHelp.backgroundSteps()))
+        background.addView(Ui.linkRow(this, "Open Danteye's app settings", "Battery, mobile data and permissions") {
+            BackgroundHelp.openAppSettings(this)
+        })
+        page.addView(background, Ui.blockParams(this))
 
         val display = Ui.card(this)
         display.addView(Ui.title(this, "Display"))
@@ -1091,30 +1235,29 @@ class MainActivity : Activity() {
         })
         page.addView(display, Ui.blockParams(this))
 
-        val devicesCard = Ui.card(this)
-        devicesCard.addView(Ui.title(this, "Camera and sensor board"))
-        addConnectionStrip(devicesCard)
-        devicesCard.addView(Ui.linkRow(this, "Device settings and tests", "Addresses, find the boards, test the camera, sensors and buzzer") {
-            startActivity(Intent(this, SettingsActivity::class.java))
+        val accountCard = Ui.card(this)
+        accountCard.addView(Ui.title(this, "Account"))
+        accountCard.addView(Ui.linkRow(this, if (cloud.signedIn) cloud.email else "Not signed in",
+            if (cloud.signedIn) cloud.connectionLabel else "Sign in so your supervisor can see your trips") {
+            showAccount()
         })
-        devicesCard.addView(Ui.linkRow(this, "Setup guide & camera alignment", "Wi-Fi, device checks and camera position, step by step") {
+        page.addView(accountCard, Ui.blockParams(this))
+
+        val help = Ui.card(this)
+        help.addView(Ui.title(this, "Help"))
+        help.addView(Ui.linkRow(this, "Setup guide", "Wi-Fi, device checks, camera position and calibration") {
             if (DriverMonitoringService.active) cloud.toast("Stop monitoring first: the camera serves one viewer at a time")
             else startActivity(Intent(this, SetupActivity::class.java))
         })
-        page.addView(devicesCard, Ui.blockParams(this))
-
-        addAccountCard()
-
-        val help = Ui.card(this)
-        help.addView(Ui.title(this, "What the screen means"))
+        help.addView(Ui.eyebrow(this, "WHAT THE SCREEN MEANS"))
         for ((level, meaning) in listOf(
             "NORMAL" to "No warning signs.",
-            "LOW" to "Mild signs (short look away, a yawn). Stay alert.",
-            "MEDIUM" to "Clear signs (eyes closing, phone, looking away for seconds). The buzzer beeps.",
-            "HIGH" to "Dangerous (long eye closure, phone use, drowsiness). Take a break.")) {
+            "LOW" to "Mild signs (a yawn, a short look away). Stay alert.",
+            "MEDIUM" to "Clear signs (eyes closing, looking away for seconds). The buzzer beeps.",
+            "HIGH" to "Dangerous (long eye closure, phone use). Take a break.")) {
             help.addView(Ui.alert(this, meaning, "", level, Ui.riskColor(level)))
         }
-        help.addView(Ui.note(this, "CALIBRATING: the first 5 seconds of each session, look at the road normally. " +
+        help.addView(Ui.note(this, "CALIBRATING: the app is learning your normal face (once, or after Recalibrate). " +
                 "NO CAMERA PICTURE: check the camera power and the DMS-NET Wi-Fi."))
         page.addView(help, Ui.blockParams(this))
 
@@ -1122,15 +1265,14 @@ class MainActivity : Activity() {
         about.addView(Ui.title(this, "About"))
         val version = try { packageManager.getPackageInfo(packageName, 0).versionName } catch (_: Exception) { "" }
         about.addView(Ui.pair(this, "Danteye", "version $version"))
-        about.addView(Ui.note(this, ModelStatus.short(this)))
+        about.addView(Ui.note(this, "Everything is analysed on this phone; pictures are not saved or sent."))
+        if (developerMode) about.addView(Ui.note(this, ModelStatus.short(this)))
         page.addView(about, Ui.blockParams(this))
 
         if (developerMode) {
             val dev = Ui.card(this)
-            dev.addView(Ui.title(this, "Developer mode"))
-            dev.addView(Ui.linkRow(this, "Developer settings", "Models, session logs, Wi-Fi provisioning (in Device settings)") {
-                startActivity(Intent(this, SettingsActivity::class.java))
-            })
+            dev.addView(Ui.title(this, "Developer"))
+            dev.addView(Ui.linkRow(this, "Developer settings", "Models, session logs, advanced") { openDevice("developer") })
             dev.addView(Ui.switchRow(this, "Developer mode", "Raw measurements, test alerts, guided recording", true) { on ->
                 if (!on) {
                     developerMode = false
@@ -1146,11 +1288,17 @@ class MainActivity : Activity() {
         if (keepY > 0) scroller.post { scroller.scrollTo(0, keepY) }
     }
 
-    /** Keep old account deep links pointing to the Settings tab. */
-    private fun showAccount() = showSettings()
+    /** One of the Device settings screens (SettingsActivity sections). */
+    private fun openDevice(section: String) =
+        startActivity(Intent(this, SettingsActivity::class.java).putExtra("section", section))
 
-    /** Account information and sign-in/sign-out controls shared by both Settings modes. */
-    private fun addAccountCard() {
+    /** Account: who is signed in, role, Firebase state, sign out. Sign-in itself is on the launcher screen. */
+    private fun showAccount() {
+        onHome = false
+        onAccount = true
+        selectTab(false, true, key = "account")
+
+        page.addView(Ui.linkRow(this, "‹ Back to Settings", "") { showSettings() }, Ui.blockParams(this))
         val account = Ui.card(this)
         account.addView(Ui.title(this, "Account"))
         if (cloud.signedIn) {
@@ -1158,14 +1306,48 @@ class MainActivity : Activity() {
             account.addView(Ui.pair(this, "Account role", cloud.role.ifBlank { "No role" }))
             account.addView(Ui.note(this, cloud.connectionLabel))
             account.addView(Ui.note(this, "Live status and alerts reach the supervisor only with the driver role."))
+            // CPECAPS: the name the supervisor sees, password change, sign out with confirmation.
+            account.addView(Ui.pair(this, "Name shown to the supervisor", cloud.shownName))
+            account.addView(Button(this).apply {
+                text = "Change my name"
+                isAllCaps = false
+                setOnClickListener {
+                    val input = EditText(this@MainActivity).apply { setText(cloud.shownName.takeIf { !it.contains("@") } ?: ""); hint = "Full name" }
+                    android.app.AlertDialog.Builder(this@MainActivity)
+                        .setTitle("Your name")
+                        .setView(input)
+                        .setPositiveButton("Save") { _, _ ->
+                            val name = input.text.toString().trim()
+                            if (name.length < 2) cloud.toast("Enter your name")
+                            else cloud.updateName(name) { _, msg -> cloud.toast(msg); if (onAccount) showAccount() }
+                        }
+                        .setNegativeButton("Cancel", null)
+                        .show()
+                }
+            })
+            account.addView(Button(this).apply {
+                text = "Change password"
+                isAllCaps = false
+                setOnClickListener {
+                    com.google.firebase.auth.FirebaseAuth.getInstance().sendPasswordResetEmail(cloud.email)
+                        .addOnCompleteListener { t -> cloud.toast(if (t.isSuccessful) "Password reset link sent to ${cloud.email}" else "Could not send the link: ${t.exception?.message}") }
+                }
+            })
             account.addView(Button(this).apply {
                 text = "Sign out"
                 isAllCaps = false
                 setOnClickListener {
                     if (DriverMonitoringService.active) { cloud.toast("Stop monitoring first"); return@setOnClickListener }
-                    cloud.signOut()
-                    startActivity(Intent(this@MainActivity, LauncherActivity::class.java))
-                    finish()
+                    android.app.AlertDialog.Builder(this@MainActivity)
+                        .setTitle("Sign out?")
+                        .setMessage("Your supervisor stops seeing your trips until you sign in again.")
+                        .setPositiveButton("Sign out") { _, _ ->
+                            cloud.signOut()
+                            startActivity(Intent(this@MainActivity, LauncherActivity::class.java))
+                            finish()
+                        }
+                        .setNegativeButton("Cancel", null)
+                        .show()
                 }
             })
         } else {
@@ -1180,5 +1362,6 @@ class MainActivity : Activity() {
             })
         }
         page.addView(account, Ui.blockParams(this))
+
     }
 }

@@ -9,6 +9,9 @@
     <!-- Keep the CPU and Wi-Fi awake while monitoring runs with the screen off. -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
 
+    <!-- CPECAPS: ask to be left out of battery optimisation, so monitoring keeps running in the background. -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+
     <!-- Check whether a network connection is available. -->
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
@@ -23,6 +26,12 @@
 
     <!-- Required for the declared special-use foreground service on Android 14+. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+
+    <!-- CPECAPS: the phone's GPS for speed and live location when the sensor board has no fix. -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
+    <uses-feature android:name="android.hardware.location.gps" android:required="false" />
 
     <!-- Application-wide configuration. Cleartext HTTP supports prototype devices. -->
     <application
@@ -66,9 +75,16 @@
 
         <!-- User-started foreground service: the detection program (ESP32-CAM video over Wi-Fi), alerts, break reminders. -->
         <service android:name=".DriverMonitoringService" android:exported="false"
-            android:foregroundServiceType="specialUse">
+            android:foregroundServiceType="specialUse|location">
             <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="User-started driver monitoring: analyses the ESP32 camera video over Wi-Fi, sounds safety alerts and gives two-hour break reminders" />
+        </service>
+
+        <!-- CPECAPS: supervisor phone keeps watching the drivers for HIGH risk (works without the cloud function). -->
+        <service android:name=".SupervisorAlertService" android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Supervisor safety alerts: watches the supervised drivers' live risk and alerts when a driver is at HIGH risk" />
         </service>
 
         <!-- Receive Firebase Cloud Messaging alerts -->

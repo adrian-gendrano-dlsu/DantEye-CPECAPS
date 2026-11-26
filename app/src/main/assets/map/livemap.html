@@ -1,0 +1,66 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<link rel="stylesheet" href="leaflet.css">
+<style>
+ html,body,#map{margin:0;height:100%;width:100%;background:#e9eef3;font-family:sans-serif}
+ .car{width:34px;height:34px;transition:transform .8s linear}
+ .badge{position:absolute;z-index:1000;left:8px;top:8px;background:rgba(15,32,58,.88);color:#fff;
+   padding:6px 10px;border-radius:10px;font-size:14px;line-height:1.3}
+ .badge b{font-size:20px}
+ .btns{position:absolute;z-index:1000;right:8px;bottom:22px;display:flex;flex-direction:column;gap:6px}
+ .btns button{border:0;border-radius:10px;padding:9px 12px;font-size:14px;background:#fff;
+   box-shadow:0 1px 4px rgba(0,0,0,.35);color:#0f203a}
+ .btns button.on{background:#1565c0;color:#fff}
+ .wait{position:absolute;z-index:999;left:0;right:0;top:45%;text-align:center;color:#40536b;font-size:15px}
+</style></head><body>
+<div id="map"></div>
+<div class="badge" id="badge" style="display:none"></div>
+<div class="wait" id="wait">Waiting for a location…</div>
+<div class="btns"><button id="follow" class="on" onclick="toggleFollow()">Follow</button>
+<button onclick="fitTrail()">Route</button></div>
+<script src="leaflet.js"></script>
+<script>
+var map = L.map('map', {zoomControl: false, attributionControl: true}).setView([14.5995, 120.9842], 12);
+// OpenStreetMap tiles, fetched by the app (LiveMap.kt) over a network with internet and cached on the phone.
+// (CARTO's free tiles now answer "API key required".)
+L.tileLayer('/tiles/{z}/{x}/{y}.png', {
+  maxZoom: 19,
+  attribution: '&copy; OpenStreetMap contributors'
+}).addTo(map);
+L.control.zoom({position:'topright'}).addTo(map);
+var COLORS = {NORMAL:'#2e7d32', NONE:'#2e7d32', LOW:'#f9a825', MEDIUM:'#ef6c00', HIGH:'#c62828'};
+function carSvg(color){ return '<svg class="car" viewBox="0 0 34 34"><circle cx="17" cy="17" r="15" fill="'+color+
+  '" stroke="#fff" stroke-width="3"/><path d="M17 6 L25 25 L17 21 L9 25 Z" fill="#fff"/></svg>'; }
+var marker = null, trail = L.polyline([], {color:'#1565c0', weight:5, opacity:.7}).addTo(map);
+var follow = true, cur = null, heading = 0, anim = null, color = COLORS.NORMAL;
+map.on('dragstart', function(){ if (follow) toggleFollow(); });
+function toggleFollow(){ follow = !follow; document.getElementById('follow').className = follow ? 'on' : '';
+  if (follow && cur) map.panTo(cur); }
+function fitTrail(){ var p = trail.getLatLngs(); if (p.length > 1) { if (follow) toggleFollow(); map.fitBounds(trail.getBounds(), {padding:[30,30]}); } }
+function bearing(a, b){ var r = Math.PI/180, y = Math.sin((b.lng-a.lng)*r)*Math.cos(b.lat*r),
+  x = Math.cos(a.lat*r)*Math.sin(b.lat*r) - Math.sin(a.lat*r)*Math.cos(b.lat*r)*Math.cos((b.lng-a.lng)*r);
+  return (Math.atan2(y, x)/r + 360) % 360; }
+function icon(){ return L.divIcon({className:'', html:'<div style="transform:rotate('+heading+'deg);width:34px;height:34px">'+carSvg(color)+'</div>', iconSize:[34,34], iconAnchor:[17,17]}); }
+// Called from the app: position, speed (km/h or null), a label and the risk level.
+function setPos(lat, lng, kmh, label, risk){
+  var to = L.latLng(lat, lng);
+  document.getElementById('wait').style.display = 'none';
+  var c = COLORS[risk] || COLORS.NORMAL, recolor = c !== color; color = c;
+  var b = document.getElementById('badge'); b.style.display = 'block';
+  b.innerHTML = (kmh == null ? '<b>–</b> km/h' : '<b>' + Math.round(kmh) + '</b> km/h') + (label ? '<br>' + label : '');
+  if (!marker) { cur = to; marker = L.marker(to, {icon: icon()}).addTo(map); map.setView(to, 16); trail.addLatLng(to); return; }
+  if (to.distanceTo(cur) > 3) { heading = bearing(cur, to); recolor = true; }
+  if (recolor) marker.setIcon(icon());
+  var from = cur, start = performance.now(), dur = 1500;
+  if (anim) cancelAnimationFrame(anim);
+  function step(now){ var k = Math.min(1, (now - start)/dur);
+    var p = L.latLng(from.lat + (to.lat-from.lat)*k, from.lng + (to.lng-from.lng)*k);
+    marker.setLatLng(p); if (follow) map.panTo(p, {animate:false});
+    if (k < 1) anim = requestAnimationFrame(step); else { anim = null; } }
+  anim = requestAnimationFrame(step);
+  cur = to;
+  var pts = trail.getLatLngs(); if (!pts.length || pts[pts.length-1].distanceTo(to) > 5) { trail.addLatLng(to); if (pts.length > 600) { pts.shift(); trail.setLatLngs(pts); } }
+}
+function clearTrail(){ trail.setLatLngs([]); }
+</script></body></html>

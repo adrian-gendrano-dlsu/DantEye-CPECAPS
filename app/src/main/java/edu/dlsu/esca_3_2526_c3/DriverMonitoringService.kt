@@ -146,25 +146,23 @@ class DriverMonitoringService : Service(), TextToSpeech.OnInitListener, MonitorS
     private var settings: DeviceSettings? = null
     private var wakeLock: PowerManager.WakeLock? = null
     private var wifiLock: WifiManager.WifiLock? = null
-    private var lastPublishMs = 0L
-    private var lastPublishedManualLocation: Pair<Double, Double>? = null
+    private var wifiLockBackground: WifiManager.WifiLock? = null
 
-    private val manualLocationTick = object : Runnable {
-        override fun run() {
-            if (!active) return
-
-            if (cloud?.ready == true &&
-                manualLocation != lastPublishedManualLocation) {
-                val frame = latest?.takeIf {
-                    System.currentTimeMillis() - latestAtMs < 3_000L
-                }
-                publish(frame)
+    /** CPECAPS: screen on / off and power-saving changes go to the session's events.jsonl. */
+    private val phoneEvents = object : android.content.BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            val type = when (intent.action) {
+                Intent.ACTION_SCREEN_ON -> "screen_on"
+                Intent.ACTION_SCREEN_OFF -> "screen_off"
+                PowerManager.ACTION_POWER_SAVE_MODE_CHANGED -> "power_save_changed"
+                PowerManager.ACTION_DEVICE_IDLE_MODE_CHANGED -> "device_idle_changed"
+                else -> return
             }
-
-            handler.postDelayed(this, 1_000L)
+            edu.dlsu.esca_3_2526_c3.monitor.EventLog.current?.event(type, BackgroundHelp.phoneState(context))
         }
     }
-
+    private var phoneEventsOn = false
+    private var lastPublishMs = 0L
     private var lastTier = ""
     private var lastNotifiedTier = ""
     // Session summary for the supervisor (drivers/<driver>/sessions/<session>)
@@ -193,6 +191,7 @@ class DriverMonitoringService : Service(), TextToSpeech.OnInitListener, MonitorS
                 }
             }
             refreshNotification()
+            monitor?.notePhoneState() // CPECAPS: battery, temperature, screen, power saving -> events.jsonl
             SessionHistoryStore.checkpoint(this@DriverMonitoringService, sessionId)
             // No picture for a while: still tell the supervisor that the driver app is running.
             if (System.currentTimeMillis() - lastPublishMs > 10_000L) publish(null)
@@ -224,7 +223,7 @@ class DriverMonitoringService : Service(), TextToSpeech.OnInitListener, MonitorS
                 return START_NOT_STICKY
             }
             START -> begin()
-            RECALIBRATE -> monitor?.recalibrate()
+            RECALIBRATE -> monitor?.userRecalibrate()
             TEST_ALERT -> {
                 vibrate(true)
                 speak("This is a test alert. Eyes on the road.")
@@ -238,12 +237,10 @@ class DriverMonitoringService : Service(), TextToSpeech.OnInitListener, MonitorS
             null -> if (!active) { stopSelf(); return START_NOT_STICKY }
         }
         if (active) {
-            startForeground(ACTIVE_ID, activeNotification())
+            startForegroundTyped()
             if (monitor == null) startPipeline()
             handler.removeCallbacks(tick)
             handler.postDelayed(tick, 30_000L)
-            handler.removeCallbacks(manualLocationTick)
-            handler.post(manualLocationTick)
         }
         return START_STICKY
     }
@@ -260,7 +257,6 @@ class DriverMonitoringService : Service(), TextToSpeech.OnInitListener, MonitorS
         recent.clear()
         latest = null
         latestAtMs = 0L
-        lastPublishedManualLocation = null
         lastTier = ""
         lastNotifiedTier = ""
         getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
@@ -297,7 +293,6 @@ class DriverMonitoringService : Service(), TextToSpeech.OnInitListener, MonitorS
         val id = sessionId
         val trip = (System.currentTimeMillis() - sessionStarted).coerceAtLeast(0L) / 1000L
         handler.removeCallbacks(tick)
-        handler.removeCallbacks(manualLocationTick)
         resetHandler.removeCallbacksAndMessages(null)
         if (active) {
             SessionHistoryStore.stop(this, id)
@@ -412,19 +407,27 @@ class DriverMonitoringService : Service(), TextToSpeech.OnInitListener, MonitorS
         }
     }
 
+    /** CPECAPS: add the location type only when location is allowed (Android 14 refuses it otherwise). */
+    private fun startForegroundTyped() {
+        if (Build.VERSION.SDK_INT >= 34) {
+            var type = android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+            if (checkSelfPermission(android.Manifest.permission.ACCESS_FINE_LOCATION) == android.content.pm.PackageManager.PERMISSION_GRANTED)
+                type = type or android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
+            startForeground(ACTIVE_ID, activeNotification(), type)
+        } else startForeground(ACTIVE_ID, activeNotification())
+    }
+
     /** Send live status (measured values) to Firebase; f = null: no picture yet / camera lost. */
     private fun publish(f: LiveFrame?) {
-        val c = cloud ?: return
-        if (!c.ready || c.role != "driver") return
         lastPublishMs = System.currentTimeMillis()
+        val c = cloud ?: return
         val trip = (lastPublishMs - sessionStarted).coerceAtLeast(0L) / 1000L
         val sensors = f?.out?.context
         val manual = manualLocation
-        lastPublishedManualLocation = manual
         val gps = sensors?.latitude != null && sensors.longitude != null
         val lat = if (gps) sensors?.latitude else manual?.first
         val lng = if (gps) sensors?.longitude else manual?.second
-        val source = if (gps) "gps" else if (manual != null) "manual" else null
+        val source = if (gps) (sensors?.locationSource ?: "gps") else if (manual != null) "manual" else null
         if (f == null) {
             c.publishLive(statuses, "Unknown", 0.0, statusText, "UNAVAILABLE", sessionId, trip, lat, lng, null, source)
             return
@@ -444,7 +447,7 @@ class DriverMonitoringService : Service(), TextToSpeech.OnInitListener, MonitorS
             else -> "Normal"
         }
         c.publishLive(statuses, risk, out.risk.risk, event, out.alertState, sessionId, trip, lat, lng,
-            sensors?.speedKmh?.takeIf { sensors.speedSource == "gps" }, source)
+            sensors?.speedKmh?.takeIf { sensors.speedSource == "gps" || sensors.speedSource == "phone_gps" }, source)
     }
 
     // ------------------------------------------------------------------ phone alerts
@@ -532,24 +535,41 @@ class DriverMonitoringService : Service(), TextToSpeech.OnInitListener, MonitorS
             .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "esca:monitoring").apply {
                 setReferenceCounted(false); acquire(12 * 60 * 60 * 1000L)
             }
-        if (wifiLock == null) {
-            val wifi = applicationContext.getSystemService(WifiManager::class.java)
+        val wifi = applicationContext.getSystemService(WifiManager::class.java)
+        if (wifiLock == null && Build.VERSION.SDK_INT >= 29) {
+            // Low latency only works while the app is on the screen ...
+            wifiLock = wifi?.createWifiLock(WifiManager.WIFI_MODE_FULL_LOW_LATENCY, "esca:camera")?.apply { setReferenceCounted(false); acquire() }
+        }
+        if (wifiLockBackground == null) {
+            // ... CPECAPS: so also hold the high-performance lock, which keeps Wi-Fi out of power saving
+            // with the screen off or the app in the background (the camera video stalled there before).
             @Suppress("DEPRECATION")
-            val mode = if (Build.VERSION.SDK_INT >= 29) WifiManager.WIFI_MODE_FULL_LOW_LATENCY else WifiManager.WIFI_MODE_FULL_HIGH_PERF
-            wifiLock = wifi?.createWifiLock(mode, "esca:camera")?.apply { setReferenceCounted(false); acquire() }
+            wifiLockBackground = wifi?.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "esca:camera-bg")?.apply { setReferenceCounted(false); acquire() }
+        }
+        if (!phoneEventsOn) {
+            val filter = android.content.IntentFilter().apply {
+                addAction(Intent.ACTION_SCREEN_ON); addAction(Intent.ACTION_SCREEN_OFF)
+                addAction(PowerManager.ACTION_POWER_SAVE_MODE_CHANGED); addAction(PowerManager.ACTION_DEVICE_IDLE_MODE_CHANGED)
+            }
+            try {
+                androidx.core.content.ContextCompat.registerReceiver(this, phoneEvents, filter, androidx.core.content.ContextCompat.RECEIVER_NOT_EXPORTED)
+                phoneEventsOn = true
+            } catch (_: Exception) { }
         }
     }
 
     private fun releaseLocks() {
         try { wakeLock?.takeIf { it.isHeld }?.release() } catch (_: Exception) {}
         try { wifiLock?.takeIf { it.isHeld }?.release() } catch (_: Exception) {}
+        try { wifiLockBackground?.takeIf { it.isHeld }?.release() } catch (_: Exception) {}
         wakeLock = null
         wifiLock = null
+        wifiLockBackground = null
+        if (phoneEventsOn) { try { unregisterReceiver(phoneEvents) } catch (_: Exception) { }; phoneEventsOn = false }
     }
 
     override fun onDestroy() {
         handler.removeCallbacks(tick)
-        handler.removeCallbacks(manualLocationTick)
         monitor?.let { m -> Thread { try { synchronized(m) { m.stop() } } catch (_: Exception) {} }.start() }
         monitor = null
         releaseLocks()

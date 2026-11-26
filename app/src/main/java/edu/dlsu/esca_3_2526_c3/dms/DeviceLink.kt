@@ -84,6 +84,8 @@ class SensorPoller(
     private val context: SensorContext,
     private val lock: Any,
     private val onError: (String) -> Unit = {},
+    /** CPECAPS: every reading, for the session's sensors.jsonl. */
+    private val onData: (JSONObject) -> Unit = {},
 ) {
     private val running = AtomicBoolean(true)
     @Volatile var lastJson: JSONObject? = null
@@ -97,6 +99,7 @@ class SensorPoller(
                 val json = JSONObject(http("${baseUrl.trimEnd('/')}/data"))
                 lastJson = json
                 synchronized(lock) { context.ingest(json, clock()) }
+                try { onData(json) } catch (_: Exception) { }
             } catch (e: Exception) {
                 errors += 1 // a missed poll just makes the data older; staleness is checked on read
                 if (errors % 10 == 1) onError("sensors: ${e.message ?: e.javaClass.simpleName}")

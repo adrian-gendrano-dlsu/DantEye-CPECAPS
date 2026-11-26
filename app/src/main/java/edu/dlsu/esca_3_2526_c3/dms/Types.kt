@@ -134,10 +134,11 @@ data class ContextReading(
     val speedKmh: Double? = null,
     val motionG: Double? = null,
     val drivingS: Double = 0.0,
-    val speedSource: String = "unknown", // gps | fixed | assumed | unknown
+    val speedSource: String = "unknown", // gps | phone_gps | fixed | assumed | unknown
     val gpsAgeS: Double? = null,
     val latitude: Double? = null,
     val longitude: Double? = null,
+    val locationSource: String? = null, // CPECAPS: "gps" (sensor board) | "phone" | null
 )
 
 class RiskAssessment(

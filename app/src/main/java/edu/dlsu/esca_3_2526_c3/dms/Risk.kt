@@ -123,6 +123,8 @@ class MamdaniSystem(val name: String, inputs: List<FuzzyVariable>, private val o
 object Rules {
     val LEVELS = listOf("Low", "Moderate", "High")
     val FATIGUE_LEVELS = listOf("Low", "Moderate", "High", "Severe")
+    /** CPECAPS: context has a fourth level, Elevated = high speed with smooth driving. */
+    val CONTEXT_LEVELS = listOf("Low", "Moderate", "Elevated", "High")
     val RISK_LEVELS = RISK_TIERS
 
     private fun sets(vararg defs: Pair<String, List<Pair<Double, Double>>>) = LinkedHashMap<String, FuzzySet>().apply {
@@ -141,6 +143,14 @@ object Rules {
         "Moderate" to listOf(0.2 to 0.0, 0.4 to 1.0, 0.6 to 0.0),
         "High" to listOf(0.45 to 0.0, 0.65 to 1.0, 0.85 to 0.0),
         "Severe" to listOf(0.7 to 0.0, 0.9 to 1.0),
+    ))
+
+    /** CPECAPS: context output / overall input with four sets (same shapes as fatigue). */
+    fun contextVariable(name: String = "context") = FuzzyVariable(name, 0.0, 1.0, sets(
+        "Low" to listOf(0.0 to 1.0, 0.3 to 0.0),
+        "Moderate" to listOf(0.2 to 0.0, 0.4 to 1.0, 0.6 to 0.0),
+        "Elevated" to listOf(0.45 to 0.0, 0.65 to 1.0, 0.85 to 0.0),
+        "High" to listOf(0.7 to 0.0, 0.9 to 1.0),
     ))
 
     fun riskVariable(name: String = "risk") = FuzzyVariable(name, 0.0, 100.0, sets(
@@ -172,12 +182,20 @@ object Rules {
         }
     }
 
-    /** C = erratic motion dominates; speed alone at most Moderate; Moderate motion at High speed -> High. 9 rules. */
+    /**
+     * C = erratic motion dominates (High). CPECAPS change: High speed with smooth driving is
+     * Elevated (it raises the risk one tier when a behaviour is present, see overallRules);
+     * Moderate motion at High speed -> High; otherwise speed alone is at most Moderate. 9 rules.
+     */
     fun contextRules() = buildList {
         for (s in 0..2) for (m in 0..2) {
-            var level = maxOf(m, minOf(s, 1))
-            if (m == 1 && s == 2) level = 2
-            add(rule("speed" to LEVELS[s], "motion" to LEVELS[m], out = LEVELS[level]))
+            val level = when {
+                m == 2 -> 3                 // erratic motion
+                m == 1 && s == 2 -> 3       // moderate motion at high speed
+                m == 0 && s == 2 -> 2       // high speed, smooth: Elevated
+                else -> maxOf(m, minOf(s, 1))
+            }
+            add(rule("speed" to LEVELS[s], "motion" to LEVELS[m], out = CONTEXT_LEVELS[level]))
         }
     }
 
@@ -188,12 +206,21 @@ object Rules {
         listOf("HIGH", "HIGH", "HIGH"),
     )
 
-    /** Low context -> one tier lower; Moderate -> unchanged; High (erratic motion) -> HIGH. 36 rules. */
+    /**
+     * Low context -> one tier lower; Moderate -> unchanged; CPECAPS: Elevated (high speed) ->
+     * one tier higher when the driver shows a sign (no sign stays NONE); High (erratic motion) -> HIGH.
+     * 4 x 3 x 4 = 48 rules (81 -> 93 rules in total).
+     */
     fun overallRules() = buildList {
-        for (f in 0..3) for (d in 0..2) for (c in 0..2) {
+        for (f in 0..3) for (d in 0..2) for (c in 0..3) {
             val base = RISK_LEVELS.indexOf(OVERALL_BASE[f][d])
-            val out = when (c) { 2 -> 3; 0 -> maxOf(0, base - 1); else -> base }
-            add(rule("fatigue" to FATIGUE_LEVELS[f], "distraction" to LEVELS[d], "context" to LEVELS[c], out = RISK_LEVELS[out]))
+            val out = when (c) {
+                3 -> 3
+                2 -> if (base == 0) 0 else minOf(3, base + 1)
+                0 -> maxOf(0, base - 1)
+                else -> base
+            }
+            add(rule("fatigue" to FATIGUE_LEVELS[f], "distraction" to LEVELS[d], "context" to CONTEXT_LEVELS[c], out = RISK_LEVELS[out]))
         }
     }
 }
@@ -236,8 +263,8 @@ class DriverRiskModel(private val cfg: Config) {
         val u = Rules::unitVariable
         fatigue = MamdaniSystem("fatigue", listOf(u("eye_closure"), u("yawning"), u("duration")), Rules.fatigueVariable(), Rules.fatigueRules(), res)
         distraction = MamdaniSystem("distraction", listOf(u("gaze"), u("phone")), u("distraction"), Rules.distractionRules(), res)
-        context = MamdaniSystem("context", listOf(u("speed"), u("motion")), u("context"), Rules.contextRules(), res)
-        overall = MamdaniSystem("overall", listOf(Rules.fatigueVariable(), u("distraction"), u("context")), Rules.riskVariable("risk"), Rules.overallRules(), res)
+        context = MamdaniSystem("context", listOf(u("speed"), u("motion")), Rules.contextVariable(), Rules.contextRules(), res)
+        overall = MamdaniSystem("overall", listOf(Rules.fatigueVariable(), u("distraction"), Rules.contextVariable()), Rules.riskVariable("risk"), Rules.overallRules(), res)
     }
 
     /** Fatigue set with the highest membership (Low / Moderate / High / Severe). */

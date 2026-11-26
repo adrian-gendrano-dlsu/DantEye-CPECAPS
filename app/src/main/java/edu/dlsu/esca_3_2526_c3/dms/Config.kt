@@ -58,7 +58,7 @@ class ObjectDetectorConfig {
 /** Optional eye-state classifier (eye_model in the YAML; the phone imports the .tflite in Settings). */
 class EyeModelConfig {
     var closedClassNames = listOf("closed", "close", "closed_eye", "closed_eyes")
-    var cropScale = 1.8
+    var cropScale = 1.2 // tight like the MRL Eye training pictures (dms/config.py)
     var grayscale = true // MRL Eye images are infrared / greyscale
 }
 
@@ -137,7 +137,7 @@ class TemporalConfig {
 class QualityConfig {
     var maxFrameGapS = 1.0
     var minEyeWidthPx = 12.0
-    var faceLossTurningEvidence = 0.3
+    var faceLossTurningEvidence = 0.2 // camera ~50 deg off-axis: the face is lost early (dms/config.py)
     var faceLossLookbackS = 0.5
     var lookDownEarGuard = 1.0
 }

@@ -65,6 +65,8 @@ class SensorContext(private val cfg: ContextConfig) {
         private set
     var lastReadingT: Double? = null
         private set
+    /** CPECAPS: the phone's own GPS, used when the sensor board has no usable fix. */
+    private var phoneFix: GpsFix? = null
 
     fun ingest(raw: JSONObject, t: Double) {
         lastReadingT = t
@@ -85,15 +87,23 @@ class SensorContext(private val cfg: ContextConfig) {
         }
     }
 
-    /** Context for a frame at monitoring time t (same clock as ingest). */
+    /** CPECAPS: a fix from the phone's GPS (speed in km/h, null when the phone does not know it). */
+    fun ingestPhone(lat: Double, lon: Double, speedKmh: Double?, t: Double) {
+        phoneFix = GpsFix(t, lat, lon, speedKmh, true, null, null)
+    }
+
+    /** Context for a frame at monitoring time t (same clock as ingest). The board's GPS wins; the phone's fills in. */
     fun read(t: Double): ContextReading {
-        val fix = lastValid?.takeIf { t - it.t <= cfg.gpsStaleS }
+        val board = lastValid?.takeIf { t - it.t <= cfg.gpsStaleS }
+        val phone = phoneFix?.takeIf { t - it.t <= cfg.gpsStaleS }
+        val fix = board ?: phone
         val speed = fix?.speedKmh
         val m = if (t - motionT <= cfg.gpsStaleS) motion else null
         return ContextReading(
             speedKmh = speed, motionG = m, drivingS = duration.update(t, speed),
-            speedSource = if (speed != null) "gps" else "assumed",
+            speedSource = if (speed == null) "assumed" else if (fix === board) "gps" else "phone_gps",
             gpsAgeS = fix?.let { Num.pyRound(t - it.t, 2) }, latitude = fix?.lat, longitude = fix?.lon,
+            locationSource = if (fix == null) null else if (fix === board) "gps" else "phone",
         )
     }
 }

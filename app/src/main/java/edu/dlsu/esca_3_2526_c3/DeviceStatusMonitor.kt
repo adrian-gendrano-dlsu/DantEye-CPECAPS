@@ -10,6 +10,8 @@ import android.os.Looper
 import android.os.SystemClock
 import edu.dlsu.esca_3_2526_c3.dms.AimAdvice
 import edu.dlsu.esca_3_2526_c3.dms.CameraAimer
+import edu.dlsu.esca_3_2526_c3.dms.FaceObservation
+import edu.dlsu.esca_3_2526_c3.dms.FrameFeatures
 import edu.dlsu.esca_3_2526_c3.dms.FeatureExtractor
 import edu.dlsu.esca_3_2526_c3.dms.PerceptionResult
 import edu.dlsu.esca_3_2526_c3.monitor.DeviceSettings
@@ -45,6 +47,10 @@ class DeviceStatusMonitor(private val context: Context, private val aim: Boolean
 
     var state = State()
         private set
+    /** Setup calibration: pictures as fast as the camera answers (about 5-8 per second) instead of one per second. */
+    @Volatile var fast = false
+    /** Called (on the check thread) with every face found in aim mode: setup calibration and zoom. */
+    @Volatile var onFace: ((FrameFeatures, FaceObservation, Bitmap) -> Unit)? = null
     @Volatile private var running = false
     private val handler = Handler(Looper.getMainLooper())
     private val settings = DeviceSettings(context)
@@ -66,8 +72,8 @@ class DeviceStatusMonitor(private val context: Context, private val aim: Boolean
                     // A failed check supplies photo=null, so an old image cannot remain visible.
                     state = checked
                     onChange()
-                    // Faster refresh while aiming the camera.
-                    handler.postDelayed(this, if (aim) 1_000L else 5_000L)
+                    // Faster refresh while aiming the camera, fastest while calibrating.
+                    handler.postDelayed(this, if (fast) 50L else if (aim) 1_000L else 5_000L)
                 }
             }.start()
         }
@@ -129,9 +135,16 @@ class DeviceStatusMonitor(private val context: Context, private val aim: Boolean
         val ms = SystemClock.elapsedRealtime() - t0
         val obs = model.detect(frame, ms) ?: return Triple(false, null, aimer.update(null, null))
         val f = extractor.extract(PerceptionResult(frame.width, frame.height, obs), ms / 1000.0)
+        try { onFace?.invoke(f, obs, frame) } catch (_: Exception) {}
         val middle = (obs.bbox[0] + obs.bbox[2]) / 2.0
         val offset = ((middle - frame.width / 2.0) / (frame.width / 2.0) * 100.0).roundToInt()
         return Triple(true, offset, aimer.update(f.yaw, f.pitch))
+    }
+
+    private fun checkCameraOnly(frame: Bitmap?, last: State): State {
+        val (found, offset, advice) = try { frame?.let { analyse(it) } ?: Triple(false, null, null) }
+        catch (_: Exception) { Triple(false, null, null) }
+        return last.copy(camera = frame != null, photo = frame, faceOffsetPercent = offset, faceFound = found, aim = advice)
     }
 
     private fun check(): State {
@@ -139,7 +152,10 @@ class DeviceStatusMonitor(private val context: Context, private val aim: Boolean
         val sensorUrl = settings.sensorUrl.trim().trimEnd('/')
 
         val frame = try { if (cameraUrl.isBlank()) null else photo("$cameraUrl/jpg") } catch (_: Exception) { null }
-        val sensor = if (sensorUrl.isBlank()) null else sensors(sensorUrl)
+        // While calibrating only the camera matters: keep the last sensor reading (faster pictures).
+        val last = state
+        val sensor = if (sensorUrl.isBlank()) null else if (fast && last.checked) null else sensors(sensorUrl)
+        if (fast && last.checked) return checkCameraOnly(frame, last)
         val (found, offset, advice) = try { frame?.let { analyse(it) } ?: Triple(false, null, null) }
         catch (_: Exception) { Triple(false, null, null) }
 

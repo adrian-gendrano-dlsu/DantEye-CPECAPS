@@ -41,7 +41,9 @@ class DecisionEngine(val cfg: Config, alertIdPrefix: String? = null) {
 
         val risk = riskModel.assess(severity, ctx)
         if ((risk.inputs["motion"] ?: 0.0) >= cfg.context.suddenMotionScore) behavior.active = behavior.active + "sudden_motion"
-        val alertCmds = alerts.update(f.t, risk.tier, behavior.active, behavior.events, reason(severity, risk))
+        // Still learning the driver's normal face: no alarms (dms/engine.py); ongoing alerts stop.
+        val alertCmds = if (calibrator.status == CALIBRATING) alerts.update(f.t, "NONE", emptyList(), emptyList(), reason(severity, risk))
+            else alerts.update(f.t, risk.tier, behavior.active, behavior.events, reason(severity, risk))
         return EngineOutput(states, behavior, severity, risk, alertCmds, alerts.activeTier, calibrator.status, ctx, alerts.state)
     }
 

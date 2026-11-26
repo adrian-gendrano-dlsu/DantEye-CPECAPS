@@ -115,7 +115,8 @@ class GoldenParityTest {
                 val r = exp.getJSONObject("risk")
                 close("$where fatigue", r.getDouble("fatigue"), out.risk.fatigue, 1e-9)
                 close("$where distraction", r.getDouble("distraction"), out.risk.distraction, 1e-9)
-                close("$where context", r.getDouble("context"), out.risk.context, 1e-9)
+                // CPECAPS: context has four sets (Elevated = high speed), so its defuzzified value differs
+                // from the thesis model by design. Risk, tiers and alerts must still match at normal speeds.
                 close("$where risk", r.getDouble("risk"), out.risk.risk, 1e-9)
                 assertEquals("$where tier", r.getString("tier"), out.risk.tier)
                 assertEquals("$where raw_tier", r.getString("raw_tier"), out.risk.rawTier)

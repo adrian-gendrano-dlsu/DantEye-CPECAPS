@@ -2,33 +2,76 @@
   "rules": {
     ".read": false,
     ".write": false,
-    "roles": {
+    "accounts": {
+      ".read": "auth != null && root.child('accounts').child(auth.uid).child('role').val() === 'supervisor'",
       "$uid": {
         ".read": "auth != null && auth.uid === $uid",
-        ".write": "auth != null && auth.uid === $uid && !data.exists() && newData.val() === 'driver'"
+        ".write": "auth != null && root.child('accounts').child(auth.uid).child('role').val() === 'supervisor'",
+        "role": {
+          ".write": "auth != null && (root.child('accounts').child(auth.uid).child('role').val() === 'supervisor' || (auth.uid === $uid && newData.val() === 'supervisor' && !root.child('setup').child('firstSupervisor').exists() && newData.parent().parent().parent().child('setup').child('firstSupervisor').val() === auth.uid))",
+          ".validate": "newData.val() === 'driver' || newData.val() === 'supervisor'"
+        },
+        "email": {
+          ".write": "auth != null && (auth.uid === $uid || root.child('accounts').child(auth.uid).child('role').val() === 'supervisor')",
+          ".validate": "newData.isString()"
+        },
+        "name": {
+          ".write": "auth != null && (auth.uid === $uid || root.child('accounts').child(auth.uid).child('role').val() === 'supervisor')",
+          ".validate": "newData.isString() && newData.val().length <= 80"
+        },
+        "requestedRole": {
+          ".write": "auth != null && (auth.uid === $uid || root.child('accounts').child(auth.uid).child('role').val() === 'supervisor')",
+          ".validate": "newData.val() === 'driver' || newData.val() === 'supervisor'"
+        },
+        "requestedAt": {
+          ".write": "auth != null && (auth.uid === $uid || root.child('accounts').child(auth.uid).child('role').val() === 'supervisor')",
+          ".validate": "newData.isString()"
+        },
+        "requestedAtMs": {
+          ".write": "auth != null && (auth.uid === $uid || root.child('accounts').child(auth.uid).child('role').val() === 'supervisor')",
+          ".validate": "newData.isNumber()"
+        },
+        "lastSignIn": {
+          ".write": "auth != null && (auth.uid === $uid || root.child('accounts').child(auth.uid).child('role').val() === 'supervisor')",
+          ".validate": "newData.isString()"
+        },
+        "lastSignInMs": {
+          ".write": "auth != null && (auth.uid === $uid || root.child('accounts').child(auth.uid).child('role').val() === 'supervisor')",
+          ".validate": "newData.isNumber()"
+        },
+        "$other": {
+          ".validate": false
+        }
+      }
+    },
+    "setup": {
+      ".read": "auth != null",
+      "firstSupervisor": {
+        ".write": "auth != null && !data.exists() && newData.val() === auth.uid && newData.parent().parent().child('accounts').child(auth.uid).child('role').val() === 'supervisor'"
+      },
+      "firstSupervisorEmail": {
+        ".write": "auth != null && !root.child('setup').child('firstSupervisor').exists()"
+      },
+      "created": {
+        ".write": "auth != null && !root.child('setup').child('firstSupervisor').exists()"
       }
     },
     "drivers": {
-      ".read": "auth != null && root.child('roles').child(auth.uid).val() === 'supervisor'",
-      "$driverId": {
-        ".read": "auth != null && auth.token.email != null && $driverId === auth.token.email.toLowerCase().replace('%', '%25').replace('-', '%2D').replace('.', '-').replace('#', '%23').replace('$', '%24').replace('[', '%5B').replace(']', '%5D').replace('/', '%2F') && root.child('roles').child(auth.uid).val() === 'driver'",
-        ".write": "auth != null && auth.token.email != null && $driverId === auth.token.email.toLowerCase().replace('%', '%25').replace('-', '%2D').replace('.', '-').replace('#', '%23').replace('$', '%24').replace('[', '%5B').replace(']', '%5D').replace('/', '%2F') && root.child('roles').child(auth.uid).val() === 'driver'"
+      ".read": "auth != null && root.child('accounts').child(auth.uid).child('role').val() === 'supervisor'",
+      "$uid": {
+        ".read": "auth != null && auth.uid === $uid && root.child('accounts').child(auth.uid).child('role').val() === 'driver'",
+        ".write": "auth != null && auth.uid === $uid && root.child('accounts').child(auth.uid).child('role').val() === 'driver'",
+        "alerts": {
+          ".indexOn": [
+            "timestampMs"
+          ]
+        }
       }
     },
-    "alerts": {
-      ".read": "auth != null && root.child('roles').child(auth.uid).val() === 'supervisor'",
-      "$driverId": {
-        ".read": "auth != null && auth.token.email != null && $driverId === auth.token.email.toLowerCase().replace('%', '%25').replace('-', '%2D').replace('.', '-').replace('#', '%23').replace('$', '%24').replace('[', '%5B').replace(']', '%5D').replace('/', '%2F') && root.child('roles').child(auth.uid).val() === 'driver'",
-        ".write": "auth != null && auth.token.email != null && $driverId === auth.token.email.toLowerCase().replace('%', '%25').replace('-', '%2D').replace('.', '-').replace('#', '%23').replace('$', '%24').replace('[', '%5B').replace(']', '%5D').replace('/', '%2F') && root.child('roles').child(auth.uid).val() === 'driver'",
-        ".indexOn": [
-          "timestampMs"
-        ]
-      }
-    },
-    "supervisorTokens": {
+    "supervisorPhones": {
       "$uid": {
         ".read": false,
-        ".write": "auth != null && auth.uid === $uid && root.child('roles').child(auth.uid).val() === 'supervisor'"
+        ".write": "auth != null && auth.uid === $uid && root.child('accounts').child(auth.uid).child('role').val() === 'supervisor'"
       }
     }
   }
